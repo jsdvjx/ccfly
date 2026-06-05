@@ -21,22 +21,20 @@
 It does **not** scrape the screen. It mirrors the *inner world* — the jsonl transcript Claude already writes under `~/.claude`, plus the underlying `tmux` pane — into a *surface world* you can render and control. Detach, lock your phone, walk away, reconnect: the session keeps running in `tmux` and **nothing is lost**.
 
 ```
-        ┌────────────────────────── inner world ──────────────────────────┐
-        │   Claude Code  ──►  ~/.claude/**.jsonl   (transcript · tool calls) │
-        │        ⇅                                                          │
-        │      tmux pane  ◄──►  PTY                                         │
-        └───────────────────────────────┬──────────────────────────────────┘
-                                         │  reads jsonl · drives tmux · /term WS
-                          ┌──────────────▼──────────────┐
-                          │   ccfly   (Go control svc)   │   npx ccfly serve
-                          │   HTTP + WebSocket API       │   127.0.0.1:7699
-                          └──────────────┬──────────────┘
-                                         │  baseUrl (HTTP/WS)
-        ┌────────────────────────────────▼─────────────────────────────────┐
-        │   surface world  —  @ccfly/react                                   │
-        │   transcript · tool cards · diffs · permission prompts · input ·   │
-        │   live terminal mirror · subagents · workflows                     │
-        └────────────────────────────────────────────────────────────────────┘
+━━━ inner world ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    Claude Code  ──►  ~/.claude/**.jsonl     transcript · tool calls
+         ⇅
+    tmux pane   ◄──►  PTY
+              │
+              ▼   reads jsonl · drives tmux · /term WS
+━━━ ccfly · Go control service ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    HTTP + WebSocket API            npx ccfly serve · :7699
+              │
+              ▼   baseUrl (HTTP / WS)
+━━━ surface world · @ccfly/react ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    transcript · tool cards · diffs · permission prompts · input
+    live terminal mirror · subagents · workflows
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
 ## ✨ Why ccfly

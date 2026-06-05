@@ -7,11 +7,11 @@ dist/
 dist-ssr/
 *.tsbuildinfo
 
-# Go binaries
+# Go binaries (anchored so they don't swallow the go/cmd/ccfly source dir)
 /bin/
 /go/bin/
+/go/ccfly
 *.exe
-ccfly
 !packages/cli/bin/
 !packages/cli/bin/ccfly.js
 
