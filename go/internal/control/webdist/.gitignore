@@ -1,0 +1,8 @@
+# Built web assets are staged here by scripts/build-web.sh and embedded into
+# the binary via //go:embed all:webdist. The build output is generated, so it
+# is NOT tracked — except the placeholder index.html, which guarantees the
+# embed directory has a real file on a fresh checkout so `go build` always
+# works without first running the web build.
+*
+!.gitignore
+!index.html

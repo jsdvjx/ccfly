@@ -77,6 +77,17 @@ goos_to_npm() {
 echo "build-binaries: version=${VERSION}"
 echo "build-binaries: targets=${TARGETS}"
 
+# --- build + embed the web UI first ----------------------------------------
+# Every per-platform binary embeds go/internal/control/webdist via //go:embed,
+# so refresh that staging dir once up front before the cross-compile matrix.
+# Set SKIP_WEB=1 to reuse whatever is already staged (e.g. fast Go-only rebuild).
+if [[ "${SKIP_WEB:-0}" == "1" ]]; then
+  echo "build-binaries: SKIP_WEB=1 — reusing existing go/internal/control/webdist"
+else
+  echo "build-binaries: building web UI (scripts/build-web.sh)"
+  bash "${SCRIPT_DIR}/build-web.sh"
+fi
+
 # --- sync subpackage versions to lockstep ----------------------------------
 sync_subpkg_version() {
   local pkg_json="$1" ver="$2"

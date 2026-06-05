@@ -1,6 +1,6 @@
 {
   "name": "@ccfly/react",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "React components that render a Claude Code session as a live, controllable web view.",
   "license": "MIT",
   "type": "module",
@@ -24,11 +24,18 @@
   "keywords": [
     "claude",
     "claude-code",
+    "anthropic",
+    "ai-agent",
+    "coding-agent",
     "tmux",
     "terminal",
     "websocket",
-    "react",
     "xterm",
+    "react",
+    "react-component",
+    "transcript-viewer",
+    "code-anywhere",
+    "ui",
     "ccfly"
   ],
   "scripts": {

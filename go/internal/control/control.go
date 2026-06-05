@@ -27,6 +27,8 @@ package control
 //   GET  /image               用户消息里的图片字节
 //   GET  /info                会话信息(模型/上下文用量/累计 token)
 //   GET  /term                自带网页终端 WebSocket(PTY+tmux,ttyd 帧兼容;去外部 ttyd 依赖)
+//   GET  /sessions            落地页会话列表(@ccfly/react SessionMeta[] 形状)
+//   GET  /                     内嵌 web 表世界 SPA(兜底;静态文件 + history 回退 index.html)
 
 import (
 	"context"
@@ -62,7 +64,11 @@ func Handler() http.Handler {
 	mux.HandleFunc("GET /state", handleState)
 	mux.HandleFunc("GET /info", handleInfo)
 	mux.HandleFunc("POST /start", handleStart)
-	mux.HandleFunc("GET /term", handleTerm) // 自带网页终端 WS(ttyd 兼容);去外部 ttyd 依赖
+	mux.HandleFunc("GET /term", handleTerm)         // 自带网页终端 WS(ttyd 兼容);去外部 ttyd 依赖
+	mux.HandleFunc("GET /sessions", handleSessions) // 落地页会话列表(SessionMeta[] 形状)
+	// 内嵌 web 表世界 SPA:必须最后注册「GET /」兜底。Go 1.22 ServeMux「最具体优先」,
+	// 上面各显式 API 路由自动赢过它;剩下「非 API、无文件」路径回退 index.html(history 路由)。
+	mux.HandleFunc("GET /", staticHandler())
 	return mux
 }
 

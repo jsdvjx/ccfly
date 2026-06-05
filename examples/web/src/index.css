@@ -1,0 +1,184 @@
+/* 表世界外壳样式——刻意保持极简、深色,重 UI 来自 @ccfly/react。
+   只负责:落地页(会话选择器)的版式 + 全局背景/字体兜底。 */
+
+:root {
+  --bg: #0f1115;
+  --card: #161922;
+  --card-hi: #1c2030;
+  --line: #232838;
+  --fg: #e6e8ee;
+  --muted: #8b91a3;
+  --accent: #5b8cff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'PingFang SC', 'Microsoft YaHei', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── 落地页:会话选择器 ── */
+.picker {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px 16px calc(24px + env(safe-area-inset-bottom));
+}
+
+.picker-hdr {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 8px 6px 16px;
+}
+.picker-hdr h1 {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+.picker-hdr .sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+.picker-hdr .refresh {
+  margin-left: auto;
+  background: var(--card);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 5px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.picker-hdr .refresh:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+
+.picker-group {
+  margin-bottom: 18px;
+}
+.picker-group .gh {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  margin: 0 8px 8px;
+}
+
+.pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  color: inherit;
+  transition:
+    background 0.12s,
+    border-color 0.12s;
+}
+.pick:hover {
+  background: var(--card-hi);
+  border-color: var(--accent);
+}
+
+/* 状态徽标 */
+.st {
+  flex: none;
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.b-working {
+  color: #9dc0ff;
+  background: rgba(91, 140, 255, 0.14);
+  border-color: rgba(91, 140, 255, 0.35);
+}
+.b-awaiting_input {
+  color: #ffcf7a;
+  background: rgba(255, 184, 77, 0.14);
+  border-color: rgba(255, 184, 77, 0.35);
+}
+.b-error {
+  color: #ff9a9a;
+  background: rgba(255, 90, 90, 0.14);
+  border-color: rgba(255, 90, 90, 0.35);
+}
+.b-idle,
+.b-closed,
+.b-unknown {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: var(--line);
+}
+/* live 小圆点(有同名 tmux 在跑) */
+.live-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4ade80;
+  box-shadow: 0 0 6px rgba(74, 222, 128, 0.6);
+}
+
+.pick-main {
+  flex: 1;
+  min-width: 0;
+}
+.pt {
+  font-weight: 600;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pm {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pm .sep {
+  opacity: 0.5;
+  margin: 0 6px;
+}
+
+.pick-meta {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 48px 16px;
+  font-size: 14px;
+}
