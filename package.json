@@ -18,8 +18,9 @@
     "build:binaries": "bash scripts/build-binaries.sh",
     "typecheck": "pnpm -r --filter ./packages/* run typecheck",
     "changeset": "changeset",
-    "version": "changeset version",
-    "release": "pnpm build && pnpm build:binaries && changeset publish"
+    "version": "changeset version && pnpm install --lockfile-only",
+    "publish:binaries": "pnpm -r --filter \"./npm/*\" publish --access public --no-git-checks",
+    "release": "pnpm build && CLEAN=1 pnpm build:binaries && pnpm publish:binaries && changeset publish"
   },
   "devDependencies": {
     "@changesets/cli": "^2.27.0",

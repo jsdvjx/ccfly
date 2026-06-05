@@ -22,6 +22,53 @@ here — run it yourself when you are ready to publish.
 
 ---
 
+## Automated release (changesets) — for every version after 0.1.0
+
+Once the repo and npm org exist, releases are driven by [changesets] and the root
+`package.json` scripts. The manual runbook below remains the reference for the very
+first publish and for understanding what the scripts do under the hood.
+
+```sh
+# 1. While working: record what changed (pick the bump per package).
+pnpm changeset                 # writes a .changeset/*.md file
+
+# 2. Cut the release: consume changesets → bump versions, write CHANGELOGs,
+#    update the CLI's pinned optionalDependencies, and refresh the lockfile.
+#    NOTE: use `pnpm run version` — bare `pnpm version` hits pnpm's built-in
+#    version bumper instead of this script.
+pnpm run version               # = changeset version && pnpm install --lockfile-only
+#    Review/commit the resulting version + CHANGELOG diff.
+
+# 3. Build everything and publish (needs npm auth — NPM_TOKEN in CI, or `npm login`).
+pnpm release
+```
+
+`pnpm release` runs, in order:
+
+1. `pnpm build` — builds `@ccfly/react` `dist/`.
+2. `CLEAN=1 pnpm build:binaries` — embeds the web UI and cross-compiles all four
+   `npm/ccfly-<os>-<arch>/bin/ccfly`, syncing their versions to the CLI.
+3. `pnpm publish:binaries` — publishes the four platform packages **first**
+   (`pnpm -r --filter "./npm/*" publish`). This is a deliberate first phase:
+   `changeset publish` publishes every package in parallel (`Promise.all`) with no
+   topological ordering, and the CLI's `optionalDependencies` pin these binaries by
+   exact version — so they must reach the registry before the CLI does.
+4. `changeset publish` — publishes the `ccfly` CLI and `@ccfly/react`, creates git
+   tags, and honors `access: public`.
+
+Both publish phases **skip versions already on the registry**, so `pnpm release` is
+safe to re-run after a partial failure. (Because the binaries are published in phase 3,
+`changeset publish` skips them in phase 4 and therefore does not create their git tags;
+the lockstep `ccfly@<version>` tag covers the set. Tag the binaries manually if you need
+per-package tags.) After publishing, push the tags: `git push --follow-tags`.
+
+Versions: the `ccfly` CLI and the four `ccfly-<os>-<arch>` packages move in lockstep
+(`.changeset/config.json` `fixed`); `@ccfly/react` versions independently.
+
+[changesets]: https://github.com/changesets/changesets
+
+---
+
 ## Prerequisites
 
 - Node ≥ 18, pnpm 9, Go ≥ 1.23 (built/tested with Go 1.26).
