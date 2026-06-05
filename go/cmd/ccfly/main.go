@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -84,18 +85,53 @@ func runServe(ctx context.Context, args []string) error {
 	return control.Serve(ctx, addr)
 }
 
-// runConnect enrolls this device with a ccfly-cloud and holds the mesh tunnel open.
+// runConnect enrolls this device with a ccfly-cloud and holds the mesh tunnel
+// open. By default it ALSO runs the control service in-process on an ephemeral
+// loopback port (the overlay listener proxies to it) — one command serves and
+// joins. --no-serve instead proxies the overlay to a separately-run `ccfly
+// serve` (CCFLY_LOCAL_PORT, default 7699).
 func runConnect(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("connect", flag.ExitOnError)
+	noServe := fs.Bool("no-serve", false, "don't run the control service in-process; proxy the overlay to a separate `ccfly serve` (CCFLY_LOCAL_PORT, default 7699)")
+	claudeDir := fs.String("claude-dir", os.Getenv("CCFLY_CLAUDE_DIR"), "Claude projects dir for the in-process control service (default ~/.claude/projects)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: ccfly connect <host>/<code> [--no-serve] [--claude-dir <dir>]")
+		fs.PrintDefaults()
+	}
 	if len(args) < 1 || args[0] == "" {
-		return errors.New(`usage: ccfly connect <host>/<code>`)
+		fs.Usage()
+		return errors.New("missing <host>/<code>")
 	}
-	// CCFLY_LOCAL_PORT points the overlay proxy at a non-default `ccfly serve` port.
-	if p := os.Getenv("CCFLY_LOCAL_PORT"); p != "" {
-		if n, err := strconv.Atoi(p); err == nil {
-			mesh.SetLocalControlPort(n)
+	target := args[0]
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+
+	if *noServe {
+		// Point the overlay at a separately-run control service.
+		if p := os.Getenv("CCFLY_LOCAL_PORT"); p != "" {
+			if n, perr := strconv.Atoi(p); perr == nil {
+				mesh.SetLocalControlPort(n)
+			}
 		}
+	} else {
+		// Run the control service in-process on an ephemeral loopback port; the
+		// overlay listener proxies to it. One command = serve + join overlay.
+		if *claudeDir != "" {
+			control.SetClaudeDir(*claudeDir)
+		}
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return fmt.Errorf("start control service: %w", err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		srv := &http.Server{Handler: control.Handler()}
+		go func() { _ = srv.Serve(ln) }()
+		go func() { <-ctx.Done(); _ = srv.Close() }()
+		mesh.SetLocalControlPort(port)
+		log.Printf("ccfly: control service (in-process) on 127.0.0.1:%d", port)
 	}
-	return mesh.Connect(ctx, args[0])
+	return mesh.Connect(ctx, target)
 }
 
 func usage() {
@@ -105,9 +141,11 @@ Usage:
   ccfly serve [--port 7699] [--bind 127.0.0.1] [--claude-dir <dir>]
       Run the HTTP control service: tmux send-keys / capture, jsonl transcript
       tailing + SSE follow, subagents / workflow read views, session info.
-  ccfly connect <host>/<code>
-      Enroll this device with a ccfly-cloud control plane (using a connect code
-      generated there) and hold the overlay tunnel open. Loopback hosts use http.
+  ccfly connect <host>/<code> [--no-serve] [--claude-dir <dir>]
+      Enroll with a ccfly-cloud (using a connect code) AND run the control
+      service in-process, then hold the overlay tunnel open — one command serves
+      + joins. --no-serve proxies to a separate "ccfly serve" instead. Loopback
+      hosts use http.
   ccfly version
   ccfly help
 
