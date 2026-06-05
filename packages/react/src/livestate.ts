@@ -29,7 +29,20 @@ const reWS = /\s+/g
 // 「确认看到输入框」的行定位:claude 空闲时底部有个框,框内首行以 "❯ " 起头(NBSP 或普通空格)。
 // 与下面 reInputLine 同源,但语义不同:reInputLine 用于 suggest 定位(dim 鬼影),这里用于
 // 「确认空闲」—— 只有真在可见屏看到这条输入行,detectState 才敢把状态判成 input(idle)。
-const reInputPrompt = /^❯[\u0020\u00a0]/
+// 放宽:行首可有空白;❯ 后跟空格/NBSP 再带任意内容,或就是裸 ❯(空框尾随 NBSP 被 trimRight 掉)。
+// 为何放宽 —— 这是 /context 冻结 bug 的根因:跑完 /context、/model 等本地命令后,claude 回到底部
+// 输入框,框上方塞满静态输出(⛀⛁⛶ 区块、"Estimated usage by category" 表、力度块),这些上方内容
+// 既非 busy 也非 select,不被识别。原 reInputPrompt 死认「❯ 在第 0 列、其后必跟一个空格/NBSP」,
+// 一旦因 box 边框/主题缩进,或 translateToString(true) 把空输入框尾随的 NBSP 当空白裁掉(只剩裸
+// "❯")而漏认,hasIdlePrompt 就返 false → detectState 标 certain:false → store 保留上一个 busy →
+// 看着「卡死」。放宽后只要看到输入框就确凿判 input(与后端 ctrlstate.go「看到框即空闲」对齐),
+// 同时仍要求确凿看到框(非空缓冲),保留抗 reflow/重连瞬态的能力。
+const reInputPrompt = /^\s*❯(?:[\u0020\u00a0].*)?\s*$/
+// 输入框底栏提示行(空闲框下沿,如 "? for shortcuts · ← for agents" / "… to send" / "shift+tab")。
+// 第二条独立的「确认空闲」信号:输入行因渲染瞬态没匹配上 reInputPrompt 时,尾部见此提示也算确凿空闲。
+// busy 行是 "esc to interrupt"(已被 reBusy 先吃),select 行是 "Enter to …/esc to cancel"(已先判 select),
+// 故此 hint 只在「非 busy、非 select」时生效,不抢 busy/select。
+const reInputHint = /(\?\s*for\s+shortcuts|for\s+agents|\bto\s+send\b|shift\s*\+\s*tab)/i
 // 输入行定位:行首 "❯" 后跟「NBSP(U+00A0)或普通空格(U+0020)」。
 // 为何放宽:后端吃 tmux 原文,NBSP 与普通空格泾渭分明,故 reInputLine 死认 NBSP 即可区分
 // 真实输入行 vs 建议/历史气泡(后两者用普通空格)。但浏览器侧文本来自 xterm 的
@@ -137,8 +150,14 @@ export interface DetectResult {
   certain: boolean
 }
 
-// 「确认看到空闲输入框」:可见屏内存在以 "❯ " 起头的输入行。
+// 「确认看到空闲输入框」:可见屏内存在以 "❯" 起头的输入行(reInputPrompt),或尾部存在输入框底栏
+// 提示行(reInputHint,如 "? for shortcuts")。任一命中即认作确凿空闲。
 // 这是把状态判成 input(idle)的硬门槛 —— 仅「这一帧没读到 busy」不算空闲(可能是 reflow/空缓冲)。
+//
+// 两路信号互为兜底:静态满屏(/context 等本地命令跑完)时,输入框 "❯" 行确实在屏,prompt 路命中;
+// 万一某帧 "❯" 行因重绘瞬态没匹配上,底栏 "? for shortcuts" 提示一般还在,hint 路兜住,不再误判
+// 不确凿而保留 busy。两路都只在「非 busy(reBusy 先吃)、非 select(reFooter+opts/effort 先判)」
+// 后才被 detectState 调用,故不会抢 busy/select。
 function hasIdlePrompt(term: Terminal): boolean {
   const buf = term.buffer.active
   const { start, end } = visibleRange(term)
@@ -146,6 +165,13 @@ function hasIdlePrompt(term: Terminal): boolean {
     const line = buf.getLine(y)
     if (!line) continue
     if (reInputPrompt.test(line.translateToString(true))) return true
+  }
+  // 兜底:尾部若见输入框底栏提示行,同样算确凿空闲。
+  const last = end - 1
+  for (let y = last; y >= start && y >= last - 6; y--) {
+    const line = buf.getLine(y)
+    if (!line) continue
+    if (reInputHint.test(line.translateToString(true))) return true
   }
   return false
 }
