@@ -139,12 +139,48 @@ func validate(o Options) error {
 	return nil
 }
 
+// toolPATH locates tmux (ccfly needs it for terminal / session control) and
+// returns a PATH string with tmux's own dir first — so the installed service
+// resolves tmux even under launchd/systemd's minimal PATH (which omits
+// /opt/homebrew/bin). It errors if tmux isn't installed at all, so `ccfly
+// install` fails fast instead of leaving a service that dies at runtime.
+func toolPATH() (pathEnv, tmuxPath string, err error) {
+	std := []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+	tmuxPath, _ = exec.LookPath("tmux")
+	if tmuxPath == "" { // PATH may be minimal (e.g. under sudo) — scan common dirs
+		for _, d := range std {
+			cand := filepath.Join(d, "tmux")
+			if fi, e := os.Stat(cand); e == nil && !fi.IsDir() {
+				tmuxPath = cand
+				break
+			}
+		}
+	}
+	if tmuxPath == "" {
+		return "", "", fmt.Errorf("tmux 未找到 —— 先安装(如 `brew install tmux`);ccfly 的终端/会话控制依赖 tmux")
+	}
+	dirs := []string{filepath.Dir(tmuxPath)}
+	seen := map[string]bool{dirs[0]: true}
+	for _, d := range std {
+		if !seen[d] {
+			seen[d] = true
+			dirs = append(dirs, d)
+		}
+	}
+	return strings.Join(dirs, ":"), tmuxPath, nil
+}
+
 // ── macOS (launchd) ──
 
 func installDarwin(o Options) error {
 	if err := validate(o); err != nil {
 		return err
 	}
+	svcPATH, tmuxPath, err := toolPATH()
+	if err != nil {
+		return fmt.Errorf("ccfly install: %w", err)
+	}
+	fmt.Printf("✓ tmux: %s\n", tmuxPath)
 	name, home, uid, gid, err := runAs(o.System)
 	if err != nil {
 		return err
@@ -177,14 +213,14 @@ func installDarwin(o Options) error {
     <string>--claude-dir</string>
     <string>%s</string>
   </array>
-  <key>EnvironmentVariables</key><dict><key>HOME</key><string>%s</string></dict>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>%s</string><key>PATH</key><string>%s</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
-`, darwinLabel, userElem, binPath, o.Target, claude, home, logPath, logPath)
+`, darwinLabel, userElem, binPath, o.Target, claude, home, svcPATH, logPath, logPath)
 
 	if o.DryRun {
 		fmt.Printf("# bin   -> %s (copy of %s)\n# plist -> %s\n# run as %s, HOME=%s\n\n%s", binPath, self, plistPath, name, home, plist)
@@ -250,6 +286,11 @@ func installLinux(o Options) error {
 	if err := validate(o); err != nil {
 		return err
 	}
+	svcPATH, tmuxPath, err := toolPATH()
+	if err != nil {
+		return fmt.Errorf("ccfly install: %w", err)
+	}
+	fmt.Printf("✓ tmux: %s\n", tmuxPath)
 	name, home, _, _, err := runAs(o.System)
 	if err != nil {
 		return err
@@ -277,13 +318,14 @@ Wants=network-online.target
 
 [Service]
 %sEnvironment=HOME=%s
+Environment=PATH=%s
 ExecStart=%s connect %s --claude-dir %s
 Restart=always
 RestartSec=3
 
 [Install]
 WantedBy=%s
-`, userLine, home, binPath, o.Target, claude, wantedBy(o.System))
+`, userLine, home, svcPATH, binPath, o.Target, claude, wantedBy(o.System))
 
 	if o.DryRun {
 		fmt.Printf("# bin  -> %s (copy of %s)\n# unit -> %s\n\n%s", binPath, self, unitPath, unit)

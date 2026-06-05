@@ -38,6 +38,7 @@ import (
 var version = "0.0.0-dev"
 
 func main() {
+	ensureToolPath()
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
@@ -210,4 +211,17 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// ensureToolPath prepends common tool locations (Homebrew, /usr/local) to PATH so
+// `tmux` resolves even when ccfly runs as a service: launchd/systemd give a
+// minimal PATH (/usr/bin:/bin:…) that omits /opt/homebrew/bin, which made `ccfly
+// connect`'s /term silently fail (tmux not found → PTY exits → WS reconnect loop).
+func ensureToolPath() {
+	const extra = "/opt/homebrew/bin:/usr/local/bin"
+	if p := os.Getenv("PATH"); p != "" {
+		os.Setenv("PATH", extra+":"+p)
+	} else {
+		os.Setenv("PATH", extra+":/usr/bin:/bin:/usr/sbin:/sbin")
+	}
 }
