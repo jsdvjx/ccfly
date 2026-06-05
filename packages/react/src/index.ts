@@ -41,6 +41,16 @@ export { SlashPalette } from './Palette'
 export { SubagentHost, openSubagent } from './SubagentView'
 export type { SubagentArgs } from './SubagentView'
 
+// ── 信息卡(/cost /status /mcp /doctor /hooks /skills …:后台驱动命令抓屏 → 解析成原生卡)──
+// SessionView 默认已接线(ControlBar 缺省用 registry.isInfoCmd 判定、onRunCmd 开 InfoSheet)。
+// 仅当消费方自组控件层、或要扩展/自定义命令表时才需直接用这些导出。
+export { InfoSheet } from './info/InfoSheet'
+export { CARDS, cardFor, groupOf, isInfoCmd } from './info/registry'
+export type { CmdCard } from './info/registry'
+export { useCapture, relTime } from './info/useCapture'
+export type { Capture, Phase } from './info/useCapture'
+export type { CardModule } from './info/types'
+
 // ── 消息流渲染器(主会话 / 子代理共用)──
 export { TranscriptView, Message, MD, shortModel } from './components'
 

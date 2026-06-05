@@ -1,10 +1,9 @@
 import { useMemo, useState } from 'react'
 
-// 「信息类命令」判定:上游从 info/registry 派生(/cost /status /mcp …)。info/* 子树未抽进 ccfly
-// (可选,且会拖入 useCapture/InfoSheet 等大面积依赖),故改为「由调用方注入 isInfoCmd」,缺省「永不是信息命令」
-// —— 即所有命令都走 onPick 透传进里世界(与原行为对非信息命令一致)。
-// 消费方若要复刻 InfoSheet 体验,可自带 registry 并把 isInfoCmd 传进来。
-// P0.5 TODO:把 info/* 子树(InfoSheet + registry + 各信息卡 + useCapture)抽进包并默认接线。
+// 「信息类命令」判定(/cost /status /mcp …):由调用方注入 isInfoCmd,缺省「永不是信息命令」
+// —— 即所有命令都走 onPick 透传进里世界。info/* 子树已抽进本包(info/registry 派生 isInfoCmd),
+// ControlBar 缺省即用它接线、SessionView 用 onRunCmd 开 InfoSheet;此处保留可注入,方便消费方
+// 自组控件层时关闭信息卡(传 `() => false`)或自定义命令表。
 
 // 斜杠命令清单:tier='common' 为常用(默认显示);其余按 g 分组收进「更多」。
 // 单一数据源,增删一行即可。来源:Claude Code 内置命令 + 本环境内置技能。

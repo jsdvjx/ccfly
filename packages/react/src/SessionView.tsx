@@ -7,7 +7,9 @@
 //   - 不含 SessionPicker:列表与路由是「消费方」的事。SessionView 直接收 sid(+ 可选 host/cwd)。
 //   - host 默认空串:控制服务端点由 CCFlyProvider(config.baseUrl)决定,host 仅作 fetchSessions 过滤键
 //     与各 api 函数的(已不参与 URL 的)首参占位。多数单设备消费方传 sid 即可。
-//   - /context 等信息命令:沿用上游行为(ⓘ 直发 /context 到里世界,输出进消息流);InfoSheet 未抽入。
+//   - 信息命令(/cost /status /mcp /doctor /skills /hooks …):走 InfoSheet —— 后台驱动命令抓屏、解析成
+//     原生卡展示(info/ 子树已抽入本包)。/context 例外:它运行时往 jsonl 写 ## Context Usage,直接进消息流,
+//     故 ⓘ 仍直发 /context 到里世界(不开 InfoSheet),与上游一致。
 //
 // 必须在 <CCFlyProvider> 子树内使用。模块级单例 host(ReaderHost/SubagentHost/WorkflowOverlayHost/LightboxHost)
 // 由 <CCFlyHosts/> 提供(见 hosts.tsx),消费方在 App 根挂一次。
@@ -32,6 +34,7 @@ import { liveTermHandle } from './liveconn'
 import { useLiveDegraded } from './livestate'
 import { SessionContext } from './blocks/ctx'
 import { storageKey } from './config'
+import { InfoSheet } from './info/InfoSheet'
 import type { Item, SessionMeta } from './types'
 
 function fmtTok(n?: number): string {
@@ -156,6 +159,7 @@ export function SessionView({ sid, host = '', cwd: cwdProp, onBack }: SessionVie
   const reset = useStore((s) => s.reset)
   const [meta, setMeta] = useState<SessionMeta | undefined>()
   const [err, setErr] = useState('')
+  const [infoCmd, setInfoCmd] = useState<string | null>(null) // 当前打开的信息卡命令(/cost /status /mcp …);null=未开
   const [topLoading, setTopLoading] = useState(false)
   const [termOpen, setTermOpen] = useState(false) // 浮层终端(LiveTerm 显示态)是否打开
   const degraded = useLiveDegraded()
@@ -403,6 +407,8 @@ export function SessionView({ sid, host = '', cwd: cwdProp, onBack }: SessionVie
           ⌨ 终端
         </button>
       </header>
+      {/* 信息卡浮层:Palette/ControlBar 把信息类命令经 onRunCmd 传上来,InfoSheet 据 cmd 驱动抓屏并渲染原生卡。 */}
+      {infoCmd && <InfoSheet host={host} sid={sid} cmd={infoCmd} onClose={() => setInfoCmd(null)} />}
       <div className="scroll" ref={scroller} onScroll={onScroll}>
         {topLoading && (
           <div className="tx-top-spin" aria-label="加载更早">
@@ -419,8 +425,8 @@ export function SessionView({ sid, host = '', cwd: cwdProp, onBack }: SessionVie
       {/* 常驻隐藏 xterm:连 ttyd WS 镜像里世界,客户端 detectState 供控件层消费。 */}
       <LiveTerm host={host} sid={sid} cwd={cwd} />
       <AgentDock host={host} sid={sid} />
-      {/* onRunCmd:上游用来开 InfoSheet;info/* 未抽入,故默认 no-op(Palette 缺省也不判信息命令)。 */}
-      <ControlBar host={host} sid={sid} cwd={cwd} onRunCmd={() => {}} />
+      {/* onRunCmd:信息类命令(由 ControlBar 缺省的 registry.isInfoCmd 判定)经此打开 InfoSheet。 */}
+      <ControlBar host={host} sid={sid} cwd={cwd} onRunCmd={(cmd) => setInfoCmd(cmd)} />
     </div>
   )
 }

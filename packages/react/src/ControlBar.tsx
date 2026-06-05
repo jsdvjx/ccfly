@@ -3,6 +3,7 @@ import { fetchState, startSession, tmuxName, type CtrlState } from './api'
 import { useLiveState, useLiveDegraded } from './livestate'
 import { sendAct } from './sendkeys'
 import { SlashPalette } from './Palette'
+import { isInfoCmd as registryIsInfoCmd } from './info/registry'
 import { storageKey } from './config'
 
 // ── 还原原版 TUI:工作中 spinner/动词/计时;空闲态不再轮换 tips(已删)──────────
@@ -163,11 +164,15 @@ export function ControlBar({
   sid,
   cwd,
   onRunCmd,
+  isInfoCmd = registryIsInfoCmd,
 }: {
   host: string
   sid: string
   cwd?: string
   onRunCmd: (cmd: string) => void
+  // 命令是否为「信息类」(走 onRunCmd 开 InfoSheet 抓屏展示)。缺省取 info/registry 的派生判定
+  // (/cost /status /mcp /doctor /hooks /skills);消费方可传入自定义或 `() => false` 关闭信息卡。
+  isInfoCmd?: (cmd: string) => boolean
 }) {
   const tsess = tmuxName(sid)
   // 控件状态双源:WS 镜像在线 → 直接消费客户端 detectState(useLiveState,毫秒级、无抓屏);
@@ -388,6 +393,7 @@ export function ControlBar({
           onClose={() => setShowPal(false)}
           onPick={(cmd) => act({ text: cmd, enter: true })}
           onRun={onRunCmd}
+          isInfoCmd={isInfoCmd}
         />
       )}
       {sugCfm && (
