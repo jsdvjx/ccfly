@@ -6,14 +6,14 @@ here — run it yourself when you are ready to publish.
 
 > **Placeholders to fill first**
 >
-> - `OWNER` — the GitHub account or org that will host the repo. It appears in every
+> - `jsdvjx` — the GitHub account or org that will host the repo. It appears in every
 >   `package.json` (`repository` / `homepage`) and in `README.md`. Replace it before
 >   (or right after) publishing:
 >   ```sh
 >   # from the repo root — preview, then apply
->   grep -rlI 'OWNER/ccfly' . --exclude-dir=node_modules --exclude-dir=.git
->   grep -rlI 'OWNER/ccfly' . --exclude-dir=node_modules --exclude-dir=.git \
->     | xargs sed -i '' 's#OWNER/ccfly#<your-owner>/ccfly#g'   # macOS sed
+>   grep -rlI 'jsdvjx/ccfly' . --exclude-dir=node_modules --exclude-dir=.git
+>   grep -rlI 'jsdvjx/ccfly' . --exclude-dir=node_modules --exclude-dir=.git \
+>     | xargs sed -i '' 's#jsdvjx/ccfly#<your-owner>/ccfly#g'   # macOS sed
 >   ```
 > - `@ccfly` npm org — the scope for `@ccfly/react`. The unscoped CLI package name
 >   is just `ccfly`. If `ccfly` (unscoped) is already taken on npm, you must either
@@ -116,18 +116,18 @@ npx ccfly@0.1.0 serve --help     # should print the serve flags
 ```sh
 brew install gh
 gh auth login
-gh repo create OWNER/ccfly --public --source=. --push --description "npx control + terminal server for Claude Code sessions, plus @ccfly/react"
+gh repo create jsdvjx/ccfly --public --source=. --push --description "npx control + terminal server for Claude Code sessions, plus @ccfly/react"
 ```
 
 **Path B — create the repo on github.com, then push manually:**
 
-1. Create an empty public repo at `https://github.com/OWNER/ccfly` (no README/license — this repo already has them).
+1. Create an empty public repo at `https://github.com/jsdvjx/ccfly` (no README/license — this repo already has them).
 2. ```sh
-   git remote add origin https://github.com/OWNER/ccfly.git
+   git remote add origin https://github.com/jsdvjx/ccfly.git
    git push -u origin main
    ```
 
-(After the repo exists, remember the `OWNER` placeholder replacement from the top of
+(After the repo exists, remember the `jsdvjx` placeholder replacement from the top of
 this file if you have not done it yet, and commit/push that change.)
 
 ## 5. Tag the release (optional but recommended)

@@ -59,10 +59,10 @@
     "typescript": "^5.7.0"
   },
   "author": "ccfly",
-  "homepage": "https://github.com/OWNER/ccfly#readme",
+  "homepage": "https://github.com/jsdvjx/ccfly#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/ccfly.git",
+    "url": "git+https://github.com/jsdvjx/ccfly.git",
     "directory": "packages/react"
   },
   "publishConfig": {

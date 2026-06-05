@@ -25,8 +25,8 @@ MIT licensed. Published to npm under the **`@ccfly`** org (CLI is the bare
 package name **`ccfly`**).
 
 > **Repository placeholder:** the `repository` / `homepage` fields in every
-> `package.json` and the badges/links here use `OWNER` as a stand-in for the
-> GitHub account or org that will host this repo. Replace `OWNER` with the real
+> `package.json` and the badges/links here use `jsdvjx` as a stand-in for the
+> GitHub account or org that will host this repo. Replace `jsdvjx` with the real
 > owner before (or right after) the first publish. See [PUBLISH.md](./PUBLISH.md).
 
 ## Usage
@@ -116,7 +116,7 @@ for versioning and publishing.
 
 See [PUBLISH.md](./PUBLISH.md) for the release runbook (npm login, `@ccfly` org,
 publish order for the platform binaries + CLI + React package, and GitHub setup).
-Note the `OWNER` placeholder in `repository` / `homepage` fields must be replaced
+Note the `jsdvjx` placeholder in `repository` / `homepage` fields must be replaced
 with the real GitHub owner before publishing.
 
 ## Status
