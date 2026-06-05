@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "noEmit": true,
+    // 这层 kit 源自一个未启用 noUncheckedIndexedAccess 的上游工程
+    // (regex .exec()[i]、数组下标、Map.get() 等大量按「必定存在」用)。为「复制不改源」并保持 build 绿,
+    // 在本包覆盖关掉它(不动共享 tsconfig.base.json,其它包仍可严格)。
+    // P0.5 TODO:逐文件补 undefined 守卫后再打开 noUncheckedIndexedAccess。
+    "noUncheckedIndexedAccess": false,
+    // 注:vite/DOM 的 import.meta、xterm css import 等由 esbuild/tsup 处理;此处仅类型检查。
+    "lib": ["ES2022", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src"]
+}

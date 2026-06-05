@@ -1,0 +1,71 @@
+{
+  "name": "@ccfly/react",
+  "version": "0.1.0",
+  "description": "React components that render a Claude Code session as a live, controllable web view.",
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./style.css": "./dist/style.css"
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "claude",
+    "claude-code",
+    "tmux",
+    "terminal",
+    "websocket",
+    "react",
+    "xterm",
+    "ccfly"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "diff": "^9.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "shiki": "^4.2.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/diff": "^8.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0"
+  },
+  "author": "ccfly",
+  "homepage": "https://github.com/OWNER/ccfly#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/ccfly.git",
+    "directory": "packages/react"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

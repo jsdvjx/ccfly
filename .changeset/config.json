@@ -1,0 +1,19 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.0.0/schema.json",
+  "changelog": "@changesets/cli/changelog",
+  "commit": false,
+  "fixed": [
+    [
+      "ccfly",
+      "ccfly-darwin-arm64",
+      "ccfly-darwin-x64",
+      "ccfly-linux-arm64",
+      "ccfly-linux-x64"
+    ]
+  ],
+  "linked": [],
+  "access": "public",
+  "baseBranch": "main",
+  "updateInternalDependencies": "patch",
+  "ignore": ["ccfly-monorepo"]
+}

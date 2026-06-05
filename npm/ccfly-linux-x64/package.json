@@ -1,0 +1,33 @@
+{
+  "name": "ccfly-linux-x64",
+  "version": "0.1.0",
+  "description": "Prebuilt ccfly Go binary for linux/x64 (glibc).",
+  "license": "MIT",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin"
+  ],
+  "preferUnplugged": true,
+  "author": "ccfly",
+  "homepage": "https://github.com/OWNER/ccfly#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/ccfly.git",
+    "directory": "npm/ccfly-linux-x64"
+  },
+  "keywords": [
+    "claude-code",
+    "tmux",
+    "terminal",
+    "websocket",
+    "ccfly"
+  ]
+}

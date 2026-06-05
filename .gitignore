@@ -1,0 +1,40 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# Go binaries
+/bin/
+/go/bin/
+*.exe
+ccfly
+!packages/cli/bin/
+!packages/cli/bin/ccfly.js
+
+# Prebuilt per-platform binaries land in npm/ccfly-<os>-<arch>/bin/ at
+# build/release time (CI cross-compile). Ignore the binaries themselves but
+# keep the subpackage layout (package.json + bin/.gitkeep) tracked.
+/npm/*/bin/ccfly
+/npm/*/bin/ccfly.exe
+!/npm/*/bin/.gitkeep
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# env / local
+*.local
+.env
+.env.*
+
+# editor / os
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.sw?

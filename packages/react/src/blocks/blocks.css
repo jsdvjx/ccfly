@@ -1,0 +1,1629 @@
+/* 批次0 基座样式 · 前缀 bs-(卡) cc-(代码画布) rp-(结果) fsr-(全屏阅读器) + 族左色条 .bs--*。
+   复用现有 CSS 变量(--bg/--bg2/--card/--bd/--fg/--mut/--acc/--green/--amber/--red)与 #0c0e13 终端底。
+   各批次 agent 追加自己前缀的类到本文件;基座只管 bs-/cc-/rp-/fsr-。点击区 ≥ 40px。 */
+
+/* ── 卡壳 BlockShell ── */
+.bs {
+  position: relative;
+  margin: 6px 0;
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  overflow: hidden;
+}
+/* 族左色条:2px 左条,::before 绘制(不挤占内容) */
+.bs::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #5a6473;
+}
+.bs--file::before { background: var(--acc); }      /* 蓝 */
+.bs--exec::before { background: #4dd0e1; }          /* 青 */
+.bs--web::before { background: var(--acc); }        /* 蓝 */
+.bs--task::before { background: #b794f6; }          /* 紫 */
+.bs--skill::before { background: #4dd0e1; }         /* 青 */
+.bs--mcp::before { background: var(--amber); }      /* 琥珀 */
+.bs--plan::before { background: var(--green); }     /* 绿 */
+.bs--unknown::before { background: #5a6473; }       /* 灰 */
+.bs--err { border-color: #5a3a3a; }
+.bs--err::before { background: var(--red); }
+
+.bs-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px; /* 紧凑:对齐「命令输出」(.sn-head)规格 */
+  padding: 5px 10px 5px 12px; /* 左留出色条 */
+}
+.bs-clk { cursor: pointer; }
+.bs-clk:active { background: #1b1f29; }
+.bs-icon { flex: none; font-size: 14px; line-height: 1; width: 1.3em; text-align: center; }
+.bs-title { flex: none; font-weight: 700; font-size: 13px; color: #cbd3e1; white-space: nowrap; }
+.bs-brief {
+  flex: 1;
+  min-width: 0;
+  color: var(--mut);
+  font: 12px ui-monospace, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bs-x {
+  flex: none;
+  font-size: 10px;
+  color: var(--red);
+  background: #3a2020;
+  border-radius: 0;
+  padding: 1px 6px;
+}
+/* 运行态指示:TUI braille spinner + 实时计时(running 12s)。靠右,贴 chev 前。 */
+.bs-run {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.bs-run-spin {
+  flex: none;
+  width: 1em;
+  text-align: center;
+  font: 13px/1 ui-monospace, Menlo, monospace;
+  color: var(--acc);
+  /* 旋转帧切换在 JS 端走;这里只叠一层轻呼吸辉光,避免单调 */
+  animation: bs-glow 1.1s ease-in-out infinite;
+}
+.bs-run-t {
+  flex: none;
+  font: 600 11px ui-monospace, Menlo, monospace;
+  color: var(--acc);
+  letter-spacing: 0.01em;
+  font-variant-numeric: tabular-nums; /* 计时跳动不抖宽 */
+  opacity: 0.92;
+}
+@keyframes bs-glow {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+/* 窄屏(移动)收敛:计时弱化、间距收紧,不抢戏 */
+@media (max-width: 520px) {
+  .bs-run { gap: 4px; }
+  .bs-run-t { font-size: 10px; opacity: 0.8; }
+}
+/* 降配:用户开启 reduce-motion 时停转圈呼吸,仍显计时 */
+@media (prefers-reduced-motion: reduce) {
+  .bs-run-spin { animation: none; opacity: 0.85; }
+}
+.bs-pend {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--amber);
+  opacity: 0.7;
+}
+@keyframes bs-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.8); }
+  50% { opacity: 1; transform: scale(1.1); }
+}
+.bs-chev { flex: none; color: #5a6473; font-size: 12px; width: 1em; text-align: center; }
+.bs-body { padding: 0 10px 10px 12px; }
+
+/* ── 折叠正文 Collapsible ── */
+.bs-collapse { position: relative; }
+.bs-fadewrap { position: relative; }
+.bs-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 36px;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(12, 14, 19, 0), #0c0e13);
+}
+.bs-more {
+  margin-top: 4px;
+  min-height: 40px;
+  font-size: 12px;
+  color: var(--acc);
+  background: none;
+  border: none;
+  padding: 8px 2px;
+  cursor: pointer;
+}
+.bs-more:active { color: #7cc0ff; }
+/* 命中高亮(搜索类卡片复用) */
+.bs-hit { background: rgba(255, 207, 107, 0.22); color: var(--amber); border-radius: 3px; padding: 0 1px; }
+
+/* ── 代码画布 CodeCanvas:限高 + 横滚 + 不换行 ── */
+.cc { margin: 4px 0; }
+.cc-scroll {
+  max-height: 360px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+}
+.cc-pre {
+  margin: 0;
+  padding: 8px 0;
+  font: 12px/1.55 ui-monospace, Menlo, monospace;
+  white-space: pre; /* 不换行,横向滚动 */
+}
+.cc-line { display: flex; }
+.cc-gut {
+  flex: none;
+  width: 3.2em;
+  padding: 0 10px 0 0;
+  text-align: right;
+  color: #4a525f;
+  user-select: none;
+  white-space: pre;
+}
+.cc-txt { flex: 1; padding: 0 12px 0 0; color: #c8ccd4; white-space: pre; }
+/* shiki 行内 span 取消多余背景/边距(本组件自管行号) */
+.cc-txt .shiki, .cc-txt pre { background: transparent !important; margin: 0; padding: 0; }
+.cc-full {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--acc);
+  background: #11141b;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  padding: 9px;
+  cursor: pointer;
+}
+.cc-full:active { background: #1b1f29; }
+
+/* ── 结果面板 ResultPane ── */
+.rp { margin-top: 8px; }
+.rp-errhead { font: 700 12px system-ui; color: var(--red); margin-bottom: 4px; }
+.rp-mono {
+  margin: 0;
+  padding: 8px 10px;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  font: 12px/1.5 ui-monospace, Menlo, monospace;
+  color: #aab2c0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.rp--err .rp-mono, .rp-mono--err { color: #ffc9c9; border-color: #5a3a3a; }
+.rp--err { /* md 变体的红边由内部承担,这里仅作钩子 */ }
+
+/* ── 全屏代码阅读器 FullScreenReader ── */
+.fsr {
+  position: fixed;
+  inset: 0;
+  z-index: 80; /* 高于 sheet(40)/cfm(60)/ctoast(70) */
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.6);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.fsr-box {
+  width: 100%;
+  max-width: 1000px;
+  display: flex;
+  flex-direction: column;
+  background: #0c0e13;
+  border-left: 1px solid var(--bd);
+  border-right: 1px solid var(--bd);
+}
+.fsr-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(env(safe-area-inset-top) + 8px) 12px 8px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--card);
+}
+.fsr-lang {
+  font: 600 12px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 6px;
+  padding: 3px 9px;
+}
+.fsr-spacer { flex: 1; }
+.fsr-btn {
+  min-height: 40px;
+  min-width: 44px;
+  padding: 0 14px;
+  font: 600 14px system-ui;
+  color: var(--fg);
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 9px;
+  cursor: pointer;
+}
+.fsr-btn:active { background: #20242d; }
+.fsr-close { font-size: 16px; color: var(--mut); }
+.fsr-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: calc(env(safe-area-inset-bottom) + 20px);
+}
+.fsr-code {
+  margin: 0;
+  padding: 12px 14px;
+  font: 13px/1.6 ui-monospace, Menlo, monospace;
+  color: #c8ccd4;
+  white-space: pre; /* 纵横双向滚动 */
+}
+.fsr-code .shiki { background: transparent !important; margin: 0; padding: 0; }
+.fsr-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(env(safe-area-inset-bottom) + 30px);
+  transform: translateX(-50%);
+  z-index: 81;
+  background: #20242d;
+  color: var(--fg);
+  border: 1px solid var(--bd);
+  border-radius: 20px;
+  padding: 8px 16px;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+/* ── 批次1 文本族 · 前缀 tx-(消息头 / 用户气泡 / 助手正文 / 思考块)── */
+/* 消息头:角色标签 + 模型徽标。连续同角色由调用方不渲染头(tx-cont) */
+.tx-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 14px 0 4px;
+  font: 700 12px system-ui;
+  letter-spacing: 0.02em;
+}
+.tx-head--user { color: var(--acc); }
+.tx-head--asst { color: #cbd3e1; }
+.tx-role { flex: none; }
+.tx-model {
+  flex: none;
+  font: 600 10px system-ui;
+  color: var(--mut);
+  background: #2a2f3a;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  padding: 1px 8px;
+  letter-spacing: 0;
+}
+
+/* 文本族容器 */
+.tx-shell { margin: 0; }
+.tx-shell.tx-cont { margin-top: 6px; }
+
+/* 用户气泡内壳:卡壳(蓝底+蓝左条+方角)由外层 .msg.user .bubble 承担,这里只做内容容器 + 限高滚动 */
+.tx-bubble--user {
+  margin: 2px 0;
+  max-height: 60vh;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.tx-bubble--user .md { font-size: 14px; }
+/* 降级等宽块:横向不换行、纵向滚动(终端底,方角) */
+.tx-bubble--pre {
+  margin: 4px -12px;
+  padding: 0;
+  background: #0c0e13;
+  border-top: 1px solid var(--bd);
+  border-bottom: 1px solid var(--bd);
+}
+.tx-pre {
+  margin: 0;
+  padding: 9px 11px;
+  font: 12px/1.55 ui-monospace, Menlo, monospace;
+  color: #c8ccd4;
+  white-space: pre;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 助手正文:无卡片,直接 MD 流;软折叠由基座 Collapsible 承担 */
+.tx-body--asst { margin: 2px 0; }
+.tx-body--asst .md { font-size: 14px; }
+
+/* 思考块:整块 dim 降对比;字数徽标弱化 */
+.tx-think-cnt {
+  flex: none;
+  margin-left: auto;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #5a6473;
+}
+.tx-think-body { opacity: 0.62; }
+.tx-think-body .md { font-size: 13px; color: var(--mut); }
+.tx-think-body .md strong,
+.tx-think-body .md h1,
+.tx-think-body .md h2,
+.tx-think-body .md h3 { color: #aab2c0; }
+
+/* ── 批次1 散文代码块 CodeBlock(MD 内围栏代码;无行号)· 前缀 cb- ── */
+.cb {
+  margin: 8px 0;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  overflow: hidden;
+}
+/* 头部条:左 lang 标签、右 自绘复制按钮 */
+.cb-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 6px 4px 10px;
+  background: var(--card);
+  border-bottom: 1px solid var(--bd);
+}
+.cb-lang {
+  font: 600 11px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+.cb-spacer { flex: 1; }
+.cb-copy {
+  min-height: 28px;
+  padding: 4px 10px;
+  font: 600 11px system-ui;
+  color: var(--mut);
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  cursor: pointer;
+}
+.cb-copy:active { background: #20242d; color: var(--fg); }
+/* 不换行,横向滚动(散文代码也保持终端式横滚,避免折行破坏对齐) */
+.cb-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.cb-code {
+  margin: 0;
+  padding: 10px 12px;
+  font: 13px/1.5 ui-monospace, Menlo, monospace;
+  color: #c8ccd4;
+  white-space: pre;
+}
+.cb-code .shiki, .cb-code .shiki pre {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+}
+.cb-full {
+  display: block;
+  width: 100%;
+  min-height: 40px;
+  font-size: 12px;
+  color: var(--acc);
+  background: #11141b;
+  border: none;
+  border-top: 1px solid var(--bd);
+  padding: 9px;
+  cursor: pointer;
+}
+.cb-full:active { background: #1b1f29; }
+
+/* ── 批次1 · 文件头 FileHeader(前缀 fh-)── */
+.fh {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 2px 0 6px;
+}
+.fh-icon {
+  flex: none;
+  font-size: 13px;
+  line-height: 1;
+  width: 1.2em;
+  text-align: center;
+}
+/* 面包屑:整体可点(复制路径);窄屏靠 flex 收缩 + 中段 dir 省略,~/ 与文件名常驻 */
+.fh-crumb {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  font: 12px/1.4 ui-monospace, Menlo, monospace;
+  cursor: pointer;
+  overflow: hidden;
+}
+.fh-crumb:active { opacity: 0.7; }
+.fh-lead { flex: none; color: #5a6473; white-space: pre; }
+.fh-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--mut);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* 省略落在前段,保留靠近文件名的父目录 */
+  text-align: left;
+}
+.fh-base {
+  flex: none;
+  color: #cbd3e1;
+  font-weight: 700;
+  white-space: nowrap;
+}
+/* 分隔斜杠:常驻于 base 段、不可省略、不参与 dir 的 ellipsis/RTL,避免吞斜杠或双斜杠 */
+.fh-sep {
+  color: #5a6473;
+  font-weight: 400;
+}
+.fh-tag {
+  flex: none;
+  font: 600 10px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.fh-stat {
+  flex: none;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  white-space: nowrap;
+}
+.fh-toast {
+  position: absolute;
+  right: 0;
+  top: -2px;
+  z-index: 2;
+  background: #20242d;
+  color: var(--fg);
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  padding: 3px 10px;
+  font-size: 11px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
+}
+
+/* ── 批次1 · Diff 画布 DiffCanvas(前缀 dc-;勿用现有 .diff/.d-add)── */
+.dc {
+  margin: 4px 0;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  max-height: 360px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.dc-pre {
+  margin: 0;
+  padding: 6px 0;
+  font: 12px/1.55 ui-monospace, Menlo, monospace;
+  white-space: pre; /* 不换行,横向滚动 */
+}
+.dc-row {
+  display: flex;
+  align-items: baseline;
+}
+.dc-no {
+  flex: none;
+  width: 3em;
+  padding: 0 8px 0 0;
+  text-align: right;
+  color: #3f4654;
+  user-select: none;
+  white-space: pre;
+}
+.dc-sign {
+  flex: none;
+  width: 1.2em;
+  text-align: center;
+  user-select: none;
+  color: #5a6473;
+}
+.dc-txt {
+  flex: 1;
+  padding: 0 12px 0 2px;
+  color: #c8ccd4;
+  white-space: pre;
+}
+.dc-txt .shiki, .dc-txt pre { background: transparent !important; margin: 0; padding: 0; }
+/* 新增 / 删除 行底色与符号色 */
+.dc-add { background: rgba(63, 185, 80, 0.12); }
+.dc-add .dc-sign { color: var(--green); }
+.dc-del { background: rgba(248, 81, 73, 0.13); }
+.dc-del .dc-sign { color: var(--red); }
+.dc-del .dc-txt { color: #e0a8a8; }
+/* 词级高亮(单行替换):变化 chunk 加深底色 */
+.dc-w-add { background: rgba(63, 185, 80, 0.32); border-radius: 2px; }
+.dc-w-del { background: rgba(248, 81, 73, 0.34); border-radius: 2px; }
+/* 折叠未变行占位 */
+.dc-fold {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 2px 12px 2px 4px;
+  color: #5a6473;
+  font-size: 11px;
+  cursor: pointer;
+  background: #0a0c11;
+  border-top: 1px solid #14171f;
+  border-bottom: 1px solid #14171f;
+}
+.dc-fold:active { background: #14171f; }
+.dc-fold-i { color: var(--acc); font-size: 13px; }
+/* hunk 间分隔(structuredPatch 多 hunk):非交互,仅作上下文跳过提示 */
+.dc-hunk-gap { cursor: default; font-family: ui-monospace, Menlo, monospace; }
+.dc-hunk-gap:active { background: #0a0c11; }
+
+/* ── 批次2 网络族 · 取网页 WebFetch(前缀 wf-)── */
+/* brief:host 亮 + pathname 次,窄屏整体省略 */
+.wf-brief {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.wf-host {
+  flex: none;
+  color: #cbd3e1;
+  font: 600 12px ui-monospace, Menlo, monospace;
+  white-space: nowrap;
+}
+.wf-path {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--mut);
+  font: 12px ui-monospace, Menlo, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 可点 URL:整行,蓝、可换行不溢出 */
+.wf-url {
+  display: block;
+  margin: 2px 0 4px;
+  color: var(--acc);
+  font: 12px/1.5 ui-monospace, Menlo, monospace;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.wf-url:active { color: #7cc0ff; }
+/* prompt 一行(超出由 Collapsible 截高):问号标签 + 文本 */
+.wf-prompt {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin: 4px 0 2px;
+}
+.wf-plabel {
+  flex: none;
+  font: 600 10px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  padding: 1px 6px;
+}
+.wf-ptext {
+  flex: 1;
+  min-width: 0;
+  color: #aab2c0;
+  font: 13px/1.5 system-ui;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── 批次2 网络族 · 搜网页 WebSearch(前缀 ws-)── */
+/* brief:query 亮 + 结果计数 pill */
+.ws-brief {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.ws-query {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: #cbd3e1;
+  font: 13px system-ui;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ws-count { flex: none; }
+/* 头部域名 pill 组(复用 .pill / .pill.on / .pill.off)*/
+.ws-doms {
+  flex: none;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: auto;
+}
+.ws-dom {
+  font: 600 10px ui-monospace, Menlo, monospace;
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 结果条目列表 */
+.ws-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ws-item {
+  padding: 8px 0;
+  border-bottom: 1px solid #14171f;
+}
+.ws-item:first-child { padding-top: 2px; }
+.ws-item:last-child { border-bottom: none; padding-bottom: 2px; }
+.ws-title {
+  color: #d7dce6;
+  font: 600 13px/1.4 system-ui;
+  overflow-wrap: anywhere;
+}
+.ws-link {
+  display: inline-block;
+  margin: 2px 0;
+  color: var(--acc);
+  font: 11px ui-monospace, Menlo, monospace;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.ws-link:active { color: #7cc0ff; }
+/* 摘要:灰、夹断 2 行 */
+.ws-snip {
+  color: var(--mut);
+  font: 12px/1.45 system-ui;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── 批次2 执行族 · 前缀 bash-(命令/运行态) term-(终端正文) ── */
+
+/* 终端正文:#0c0e13 等宽,white-space:pre 横滚 + 限高盒 */
+.term { margin: 4px 0; }
+.term-out {
+  max-height: 360px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  margin: 0;
+  padding: 8px 10px;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  color: #c8ccd4;
+  font: 12px/1.55 ui-monospace, Menlo, monospace;
+  white-space: pre;
+  word-break: normal;
+}
+.term-out--err { color: #e0a8a8; border-color: #5a3a3a; }
+.term-full {
+  margin-top: 4px;
+  min-height: 40px;
+  font-size: 12px;
+  color: var(--acc);
+  background: none;
+  border: none;
+  padding: 8px 2px;
+  cursor: pointer;
+}
+.term-full:active { color: #7cc0ff; }
+
+/* 命令行:逐行蓝色 $ 提示符 + 命令原文(等宽不换行横滚) */
+.bash-cmd {
+  margin: 0 0 6px;
+  padding: 8px 10px;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  font: 12px/1.55 ui-monospace, Menlo, monospace;
+  white-space: pre;
+}
+.bash-cmd-line { display: flex; gap: 8px; align-items: baseline; white-space: pre; }
+.bash-prompt { flex: none; color: var(--acc); font-weight: 700; user-select: none; }
+.bash-cmd-txt { color: #d6deea; white-space: pre; }
+
+/* 运行中占位:蓝脉冲点 + 运行中… */
+.bash-running {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 4px 2px;
+  color: var(--mut);
+  font-size: 12px;
+}
+.bash-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--acc);
+  animation: bs-pulse 1.1s ease-in-out infinite;
+}
+.bash-running-txt { color: var(--mut); }
+
+/* ── 批次2 文件族工具卡(前缀 ft-;文件头沿用 fh-、diff 沿用 dc-)── */
+
+/* 折叠态一行 brief(塞进 BlockShell 头部副位):灰目录 + 亮 basename + 右侧 ± 统计。
+   全行单行省略;窄屏目录段先收缩省略,basename 与统计常驻。 */
+.ftb {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  overflow: hidden;
+}
+.ftb-dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: #5a6473;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* 省略落在前段,保留靠近文件名的父目录 */
+  text-align: left;
+}
+.ftb-base {
+  flex: none;
+  color: #cbd3e1;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.ftb-stat {
+  flex: none;
+  margin-left: 8px;
+  color: var(--mut);
+  font: 11px ui-monospace, Menlo, monospace;
+  white-space: nowrap;
+}
+
+/* 展开态 TUI 标题行:`● Verb(basename) · 统计`(贴 claude TUI 顶行) */
+.ftt {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 0 7px;
+  font: 12px/1.4 ui-monospace, Menlo, monospace;
+  color: #cbd3e1;
+  flex-wrap: wrap;
+}
+.ftt-dot { flex: none; font-size: 9px; line-height: 1; align-self: center; }
+.ftt-verb { flex: none; font-weight: 700; color: #cbd3e1; }
+.ftt-paren { flex: none; color: #5a6473; }
+.ftt-base {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--acc);
+  font-weight: 600;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.ftt-base:active { opacity: 0.7; }
+.ftt-sep { flex: none; color: #5a6473; margin: 0 2px; }
+.ftt-stat { flex: none; color: var(--mut); }
+
+/* 脚注:被折叠/过滤段的提示(如 system-reminder) */
+.ft-foot {
+  margin-top: 6px;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: #5a6473;
+  font-style: italic;
+}
+
+/* MultiEdit 单段:小标题 #N 可折叠 */
+.ft-seg {
+  margin: 4px 0;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  overflow: hidden;
+  background: #0a0c11;
+}
+.ft-seg-h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 10px;
+  cursor: pointer;
+  list-style: none;
+  background: var(--card);
+  border-bottom: 1px solid var(--bd);
+}
+.ft-seg-h::-webkit-details-marker { display: none; }
+.ft-seg-h:active { background: #1b1f29; }
+.ft-seg-n {
+  font: 700 11px ui-monospace, Menlo, monospace;
+  color: var(--acc);
+}
+/* 段内 dc 画布的圆角/边框由 ft-seg 承担,去掉 dc 自身边框与上边距 */
+.ft-seg .dc { margin: 0; border: none; border-radius: 0; }
+
+/* NotebookEdit insert/delete 框 */
+.ft-nb {
+  margin: 4px 0;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  overflow: hidden;
+}
+.ft-nb-h {
+  font: 700 11px ui-monospace, Menlo, monospace;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--bd);
+}
+.ft-nb--ins { border-color: rgba(63, 185, 80, 0.4); }
+.ft-nb--ins .ft-nb-h { color: var(--green); background: rgba(63, 185, 80, 0.1); }
+.ft-nb--del { border-color: rgba(248, 81, 73, 0.4); }
+.ft-nb--del .ft-nb-h { color: var(--red); background: rgba(248, 81, 73, 0.1); }
+/* 框内 dc/cc 去掉自身边框,贴合外框 */
+.ft-nb .dc, .ft-nb .cc { margin: 0; }
+.ft-nb .cc-scroll, .ft-nb .dc { border: none; border-radius: 0; }
+/* notebook markdown 单元:轻量内边距 */
+.ft-nb-md {
+  padding: 8px 10px;
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  margin: 4px 0;
+}
+.ft-nb-md .md { font-size: 13px; }
+
+/* ── 批次2 元/族控件 · 前缀 td-(todo) tk-(任务) pl-(计划) sk-(技能) mc-(mcp) gn-(generic) + 共享 mt-(卡内小节)。
+   复用 .todos/.gauge-bar/.gauge-fill/.kv/.pill;只追加本前缀类,不动他人。 */
+
+/* 卡内二级折叠段:指令/产出/结果 */
+.mt-sec { margin-top: 8px; }
+.mt-sec:first-child { margin-top: 0; }
+.mt-sec-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 0;
+  font: 700 11px system-ui;
+  letter-spacing: 0.02em;
+  color: var(--mut);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+.mt-sec-h:active { color: var(--fg); }
+.mt-sec-chev { flex: none; width: 1em; color: #5a6473; font-size: 11px; }
+.mt-sec-body { padding-top: 2px; }
+
+/* ── TodoCard(td-)── */
+.td-brief { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.td-frac { flex: none; font: 700 11px ui-monospace, Menlo, monospace; color: var(--mut); }
+.td-gauge { flex: 1; min-width: 40px; max-width: 160px; height: 7px; }
+.td-cur { display: flex; gap: 7px; padding: 4px 2px 2px; font-size: 13px; color: var(--amber); font-weight: 600; }
+.td-cur-m { flex: none; width: 16px; color: var(--amber); }
+.td-list { padding: 4px 2px; font-size: 13px; }
+
+/* ── AgentCard(tk-)── */
+.tk-type { flex: none; margin-left: 2px; }
+.tk-prompt { font-size: 13px; }
+.tk-prompt .md { font-size: 13px; }
+.tk-wait { margin-top: 6px; font: 12px ui-monospace, Menlo, monospace; color: var(--mut); opacity: 0.8; }
+
+/* 「查看记录」按钮:打开 SubagentView 弹层(复用主界面渲染) */
+.tk-view {
+  display: inline-flex; align-items: center; gap: 6px; margin-top: 8px;
+  padding: 7px 12px; font: 600 12px system-ui; color: #cfe0fb; cursor: pointer;
+  background: rgba(79, 156, 249, 0.10); border: 1px solid rgba(79, 156, 249, 0.30); border-radius: 0;
+}
+.tk-view:active { background: rgba(79, 156, 249, 0.18); }
+.tk-view-i { flex: none; font-size: 13px; line-height: 1; }
+
+/* 嵌套时间线:开关条 + 紫竖线缩进的子事件容器 */
+.tk-tl { margin-top: 8px; }
+.tk-tl-h {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 0;
+  font: 700 11px system-ui;
+  letter-spacing: 0.02em;
+  color: var(--mut);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+.tk-tl-h--on { color: #b794f6; }
+.tk-tl-h:active { color: var(--fg); }
+.tk-tl-chev { flex: none; width: 1em; color: #5a6473; font-size: 11px; }
+.tk-tl-cnt { flex: none; font: 600 10px ui-monospace, Menlo, monospace; color: var(--mut); opacity: 0.85; }
+/* 运行中小绿点(脉冲),复用 bs-pulse */
+.tk-tl-live {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #b794f6;
+  animation: bs-pulse 1.1s ease-in-out infinite;
+}
+/* 子时间线容器:左紫竖线 + 单档缩进表层级(嵌套时累加缩进) */
+.tk-sub {
+  margin: 2px 0 2px 6px;
+  padding-left: 12px;
+  border-left: 2px solid rgba(183, 148, 246, 0.35);
+}
+/* 时间线尾标:进行中转圈 / 完成打勾 */
+.tk-foot {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  margin-top: 4px;
+  font: 11px ui-monospace, Menlo, monospace;
+}
+.tk-foot--run { color: #b794f6; }
+.tk-foot--ok { color: var(--green); opacity: 0.85; }
+.tk-foot-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #b794f6;
+  animation: bs-pulse 1.1s ease-in-out infinite;
+}
+/* 深度上限折叠条:链到终端 */
+.tk-deep {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  font: 12px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  background: rgba(183, 148, 246, 0.08);
+  border: 1px solid rgba(183, 148, 246, 0.22);
+  border-radius: 0;
+  text-decoration: none;
+}
+.tk-deep:active { background: rgba(183, 148, 246, 0.16); }
+.tk-deep-i { flex: none; color: #b794f6; }
+
+/* ── PlanCard(pl-)── */
+.pl-body { font-size: 14px; }
+.pl-body .md { font-size: 14px; }
+
+/* ── SkillCard(sk-)── */
+.sk-kv { font-size: 13px; }
+
+/* ── McpCard(mc-)── */
+.mc-name { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; }
+.mc-srv { color: var(--amber); font-weight: 600; }
+.mc-sep { color: #5a6473; }
+.mc-tool { color: #cbd3e1; }
+
+/* ── AskUserQuestionCard(aq-)· 向用户提问的展示卡;命中选项高亮,纯呈现不交互 ── */
+/* 头部右侧:多问计数 */
+.aq-cnt {
+  flex: none;
+  margin-left: auto;
+  font: 600 11px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+}
+/* 等待回答:绿色脉冲文本(头部已有运行点,这里给一行明示) */
+.aq-wait {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  margin-bottom: 6px;
+  font: 12px ui-monospace, Menlo, monospace;
+  color: var(--green);
+  opacity: 0.9;
+  animation: bs-pulse 1.4s ease-in-out infinite;
+}
+/* 单个问题块:多问之间分隔 */
+.aq-q { margin-top: 12px; }
+.aq-q:first-of-type { margin-top: 0; }
+.aq-qhead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 6px;
+}
+/* header 小标签 */
+.aq-chip {
+  flex: none;
+  font: 600 10px ui-monospace, Menlo, monospace;
+  color: var(--green);
+  background: rgba(61, 220, 132, 0.12);
+  border: 1px solid rgba(61, 220, 132, 0.3);
+  border-radius: 0;
+  padding: 1px 7px;
+}
+/* 题干 */
+.aq-stem {
+  flex: 1;
+  min-width: 0;
+  color: #cbd3e1;
+  font: 600 13px/1.45 system-ui;
+  overflow-wrap: anywhere;
+}
+/* 选项列表 */
+.aq-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+/* 单个选项:左标记 + 右文本块 */
+.aq-opt {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 7px 9px;
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 0;
+}
+/* 命中(已答)高亮:绿边 + 淡绿底 */
+.aq-opt--on {
+  background: rgba(61, 220, 132, 0.1);
+  border-color: rgba(61, 220, 132, 0.4);
+}
+.aq-mark {
+  flex: none;
+  width: 1.2em;
+  text-align: center;
+  line-height: 1.5;
+  color: #5a6473;
+  font-size: 14px;
+}
+.aq-opt--on .aq-mark { color: var(--green); }
+.aq-otext { flex: 1; min-width: 0; }
+/* label 加粗;命中追加 ✓ */
+.aq-label {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: #d7dce6;
+  font: 700 13px/1.4 system-ui;
+  overflow-wrap: anywhere;
+}
+.aq-opt--on .aq-label { color: var(--green); }
+.aq-tick { flex: none; color: var(--green); font-size: 12px; }
+/* description 灰字次行 */
+.aq-desc {
+  margin-top: 2px;
+  color: var(--mut);
+  font: 12px/1.45 system-ui;
+  overflow-wrap: anywhere;
+}
+/* preview:等宽折叠框(套基座 Collapsible,样式只管 pre 自身) */
+.aq-preview {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  font: 12px/1.55 ui-monospace, Menlo, monospace;
+  color: #c8ccd4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── 伪用户弱化控件 SystemNotice(sn-)── */
+/* role==='user' 里非主动输入的条目(任务通知/斜杠命令/系统提示/中断/纯图片附件)。
+   整体 dim、低存在感,明显区别于「你」气泡:无角色头、左色条灰、字号小、默认折叠。 */
+/* 与 .msg.user/.msg.asst 同栏:继承 .msg 的 max-width:860px,水平 auto 居中(宽屏不全宽、对齐成一栏);只缩小纵向外距。 */
+.msg.sys { margin: 4px auto; }
+.sn {
+  position: relative;
+  margin: 4px 0;
+  background: transparent;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  opacity: 0.72;
+}
+.sn::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #5a6473;
+}
+.sn--notification::before { background: #b794f6; } /* 紫:子代理/工作流 */
+.sn--command::before { background: #4dd0e1; }      /* 青:命令族 */
+.sn--system::before { background: #5a6473; }       /* 灰:系统提示 */
+.sn--interrupt::before { background: var(--amber); } /* 琥珀:中断 */
+.sn--image::before { background: var(--acc); }     /* 蓝:附件 */
+
+.sn-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 10px 5px 12px; /* 左留出色条 */
+}
+.sn-clk { cursor: pointer; }
+.sn-clk:active { background: #14171f; }
+.sn-icon { flex: none; font-size: 12px; line-height: 1; width: 1.2em; text-align: center; opacity: 0.85; }
+.sn-label {
+  flex: none;
+  font: 600 11px system-ui;
+  color: var(--mut);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.sn-brief {
+  flex: 1;
+  min-width: 0;
+  color: #5a6473;
+  font: 11px ui-monospace, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sn-chev { flex: none; width: 1em; text-align: center; color: #5a6473; font-size: 11px; }
+.sn-body { padding: 0 10px 8px 12px; }
+.sn-body .md { font-size: 12px; color: var(--mut); }
+.sn-pre {
+  margin: 0;
+  padding: 8px 10px;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  font: 11px/1.5 ui-monospace, Menlo, monospace;
+  color: #aab2c0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── GenericCard(gn-)──(当前结构复用基座/CodeBlock,占位前缀以备扩展) */
+
+/* ── 批次2 搜索族 · 前缀 gr-(Grep) / gl-(Glob) / ls-(LS);命中高亮复用基座 .bs-hit ── */
+
+/* 公共:文件列表(Grep files/count、Glob)──紧凑等宽行,图标 + basename 主 + 目录灰 */
+.gr-files,
+.gl-files {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.gr-file,
+.gl-file {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 22px;
+  padding: 1px 2px;
+  font: 12px/1.5 ui-monospace, Menlo, monospace;
+}
+.gr-ficon,
+.gl-ficon {
+  flex: none;
+  width: 1.2em;
+  text-align: center;
+}
+.gr-fbase,
+.gl-fbase {
+  flex: none;
+  color: #cbd3e1;
+  white-space: nowrap;
+}
+.gr-fdir,
+.gl-fdir {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: #5a6473;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+/* count 模式右侧计数徽标 */
+.gr-fcnt {
+  flex: none;
+  margin-left: auto;
+  font: 600 11px ui-monospace, Menlo, monospace;
+  color: var(--amber);
+  background: rgba(255, 207, 107, 0.12);
+  border-radius: 0;
+  padding: 0 6px;
+}
+
+/* Grep / Glob / LS 头部右侧统计 */
+.gr-stat,
+.gl-stat,
+.ls-stat {
+  flex: none;
+  margin-left: auto;
+  font: 11px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  white-space: nowrap;
+}
+/* Grep 条件徽标条(-i / glob / type / -n / -A.. ) */
+.gr-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 2px 0 6px;
+}
+.gr-badge {
+  font: 600 10px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  padding: 1px 7px;
+}
+
+/* Grep content 模式:按文件分组,组头可折叠 + 行号 dim + 命中高亮 */
+.gr-groups { margin-top: 4px; }
+.gr-group {
+  margin: 0 0 4px;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  overflow: hidden;
+}
+.gr-ghead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 4px 9px;
+  background: var(--card);
+  cursor: pointer;
+  font: 12px ui-monospace, Menlo, monospace;
+}
+.gr-ghead:active { background: #1b1f29; }
+.gr-chev {
+  flex: none;
+  width: 1em;
+  text-align: center;
+  color: #5a6473;
+  font-size: 11px;
+}
+.gr-gicon {
+  flex: none;
+  width: 1.2em;
+  text-align: center;
+}
+.gr-gbase {
+  flex: none;
+  color: #cbd3e1;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.gr-gdir {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: #5a6473;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+.gr-gcnt {
+  flex: none;
+  margin-left: auto;
+  font: 600 11px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  background: var(--bg2);
+  border-radius: 0;
+  padding: 0 6px;
+}
+/* 命中行:行号槽 dim + 代码不换行横滚 */
+.gr-lines {
+  margin: 0;
+  padding: 4px 0 6px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  font: 12px/1.55 ui-monospace, Menlo, monospace;
+  white-space: pre;
+  border-top: 1px solid var(--bd);
+}
+.gr-line { display: flex; align-items: baseline; }
+.gr-no {
+  flex: none;
+  width: 3.4em;
+  padding: 0 10px 0 0;
+  text-align: right;
+  color: #3f4654;
+  user-select: none;
+  white-space: pre;
+}
+.gr-code {
+  flex: 1;
+  padding: 0 12px 0 0;
+  color: #c8ccd4;
+  white-space: pre;
+}
+
+/* Grep/Glob/LS 错误回退原文 */
+.gr-raw,
+.gl-raw,
+.ls-raw {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  font: 12px/1.5 ui-monospace, Menlo, monospace;
+  color: #aab2c0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.gr-raw--err,
+.gl-raw--err,
+.ls-raw--err { color: #ffc9c9; border-color: #5a3a3a; }
+
+/* Glob 空态 */
+.gl-empty {
+  margin-top: 4px;
+  font: 12px ui-monospace, Menlo, monospace;
+  color: #5a6473;
+}
+
+/* LS:目录树保留缩进、不换行横滚 */
+.ls-tree {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: #0c0e13;
+  border: 1px solid var(--bd);
+  border-radius: 0;
+  font: 12px/1.55 ui-monospace, Menlo, monospace;
+  color: #c8ccd4;
+  white-space: pre;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── 图片缩略 chip(用户消息内,文字+图片同条)前缀 ic- ──
+   VSCode 式但走深色紧凑风:小缩略圆角小卡 + 文件名 + 尺寸 W×H。点击看大图。 */
+.ic-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ic-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 4px 9px 4px 4px;
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  -webkit-tap-highlight-color: transparent;
+}
+.ic-chip:active { background: #20242d; }
+.ic-chip--err { cursor: default; }
+.ic-thumb {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0c0e13;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ic-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.ic-ph { font-size: 16px; opacity: 0.6; }
+.ic-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.ic-name {
+  font: 600 12px ui-monospace, Menlo, monospace;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+.ic-dim { font: 11px system-ui; color: var(--mut); }
+
+/* ── 图片 lightbox(看大图)前缀 lb- ── 不点外关、✕/Esc 关。 */
+.lb {
+  position: fixed;
+  inset: 0;
+  z-index: 82; /* 高于 fsr(80)/toast(81) */
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.82);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.lb-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: calc(env(safe-area-inset-top) + 8px) 12px 8px;
+  border-bottom: 1px solid var(--bd);
+  background: var(--card);
+}
+.lb-name {
+  font: 600 12px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lb-spacer { flex: 1; }
+.lb-close {
+  min-height: 40px;
+  min-width: 44px;
+  padding: 0 14px;
+  font: 600 16px system-ui;
+  color: var(--mut);
+  background: var(--bg2);
+  border: 1px solid var(--bd);
+  border-radius: 9px;
+  cursor: pointer;
+}
+.lb-close:active { background: #20242d; }
+.lb-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  padding-bottom: calc(env(safe-area-inset-bottom) + 16px);
+}
+.lb-img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+}
+
+/* ── WorkflowCard(wfc-)· 编排运行卡。复用 .bs-/.pill;accent=task(紫色条)。 ── */
+/* 折叠头副标:摘要(省略号)+ 「N phase · M agent」计数 */
+.wfc-brief { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
+.wfc-sum { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mut); }
+.wfc-counts { flex: none; font: 600 10px ui-monospace, Menlo, monospace; color: #6b7280; }
+/* 整体状态 pill:运行中走紫(与 task 族色一致)+ 脉动点 */
+.wfc-st { background: rgba(183, 148, 246, 0.16); color: #cbb6f6; border-color: rgba(183, 148, 246, 0.35); }
+.wfc-st--run::before {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #b794f6;
+  margin-right: 5px;
+  animation: bs-pulse 1.1s ease-in-out infinite;
+}
+.wfc-wait { margin-top: 6px; font: 12px ui-monospace, Menlo, monospace; color: var(--mut); opacity: 0.8; }
+
+/* phase 小节:组头(可折叠)+ 组内 agent 行容器 */
+.wfc-ph { margin-top: 8px; }
+.wfc-ph:first-child { margin-top: 2px; }
+.wfc-ph-h {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 0;
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+}
+.wfc-ph-chev { flex: none; width: 1em; color: #5a6473; font-size: 11px; }
+.wfc-ph-title { flex: 1; min-width: 0; font: 700 12px system-ui; color: #cbb6f6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wfc-ph-cnt {
+  flex: none;
+  min-width: 18px;
+  text-align: center;
+  font: 600 10px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  background: rgba(183, 148, 246, 0.12);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+/* 组内 agent 行容器:左紫竖线缩进(对齐 tk-sub 风格) */
+.wfc-ph-body {
+  margin: 2px 0 2px 6px;
+  padding-left: 10px;
+  border-left: 2px solid rgba(183, 148, 246, 0.30);
+}
+
+/* 单 agent 行 */
+.wfc-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 5px 6px;
+  border-bottom: 1px solid rgba(38, 43, 52, 0.6);
+}
+.wfc-row:last-child { border-bottom: none; }
+.wfc-row--clk { cursor: pointer; }
+.wfc-row--clk:active { background: #1b1f29; }
+.wfc-row-g { flex: none; width: 1.1em; text-align: center; color: #b794f6; font-size: 12px; line-height: 1; }
+.wfc-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.wfc-row-label { font: 600 13px system-ui; color: #cbd3e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wfc-row-sub {
+  font: 11px ui-monospace, Menlo, monospace;
+  color: var(--mut);
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wfc-row-dur { flex: none; font: 600 11px ui-monospace, Menlo, monospace; color: var(--mut); font-variant-numeric: tabular-nums; }
+/* agent 状态徽标:复用 .pill;运行中走紫脉动 */
+.wfc-badge { flex: none; }
+.wfc-badge--on { background: rgba(61, 220, 132, 0.16); color: var(--green); border-color: rgba(61, 220, 132, 0.35); }
+.wfc-badge--warn { background: rgba(255, 138, 138, 0.16); color: var(--red); border-color: rgba(255, 138, 138, 0.35); }
+.wfc-badge--off { background: #23262e; color: #6b7280; }
+.wfc-badge--run { background: rgba(183, 148, 246, 0.16); color: #cbb6f6; border-color: rgba(183, 148, 246, 0.35); }
+.wfc-badge--run::before {
+  content: '';
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: #b794f6;
+  margin-right: 4px;
+  animation: bs-pulse 1.1s ease-in-out infinite;
+}
+
+/* 底部汇总:tokens · tools · 耗时 · 模型 */
+.wfc-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--bd);
+}
+.wfc-f { font: 600 11px ui-monospace, Menlo, monospace; color: #cbd3e1; font-variant-numeric: tabular-nums; }
+.wfc-f-k { color: var(--mut); font-weight: 400; margin-right: 5px; }
+.wfc-f--model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }

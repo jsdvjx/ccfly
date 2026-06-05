@@ -1,0 +1,102 @@
+# Release pipeline (DRAFT).
+#
+# Flow (esbuild/swc-style prebuilt-binary distribution):
+#   1. Cross-compile go/cmd/ccfly for all 4 targets (CGO_ENABLED=0).
+#   2. Stamp each binary into its npm/ccfly-<os>-<arch>/bin/ subpackage and sync
+#      the subpackage version to the CLI version (scripts/build-binaries.sh).
+#   3. Build @ccfly/react.
+#   4. Run changesets: open a "Version Packages" PR, or — when that PR is merged
+#      — publish the main `ccfly`, the 4 platform subpackages, and @ccfly/react.
+#
+# The fixed group in .changeset/config.json keeps `ccfly` and the 4 platform
+# packages on one version; changesets rewrites the exact optionalDependencies in
+# the CLI package.json on version bump.
+#
+# Secrets required:
+#   NPM_TOKEN     npm automation token with publish rights to `ccfly`,
+#                 `ccfly-*`, and the `@ccfly` scope.
+#   GITHUB_TOKEN  provided automatically; needs contents+PR write (see perms).
+
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write # enables npm provenance on publish
+
+jobs:
+  release:
+    name: Cross-compile & release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # changesets needs full history
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        # version is read from package.json "packageManager"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          # go.sum may not exist yet (no external deps); hash go.mod for the
+          # build cache key instead so this doesn't fail before deps are added.
+          cache-dependency-path: go/go.mod
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # --- cross-compile the Go binaries into the per-platform subpackages ----
+      # One ubuntu runner builds all 4 targets: CGO_ENABLED=0 means no
+      # cross-toolchain is needed (pure-Go static binaries).
+      - name: Cross-compile binaries (all targets)
+        env:
+          CGO_ENABLED: "0"
+        run: pnpm build:binaries
+
+      - name: Verify binaries exist
+        run: |
+          set -euo pipefail
+          for t in darwin-arm64 darwin-x64 linux-arm64 linux-x64; do
+            f="npm/ccfly-${t}/bin/ccfly"
+            test -x "$f" || { echo "missing binary: $f" >&2; exit 1; }
+            echo "ok: $f ($(file -b "$f" 2>/dev/null || echo binary))"
+          done
+
+      # --- build the TS packages (@ccfly/react) ------------------------------
+      - name: Build packages
+        run: pnpm build
+
+      # --- changesets: version PR, or publish on merge of that PR -------------
+      - name: Create Release PR or Publish
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          # `release` re-runs build + build:binaries, then `changeset publish`.
+          publish: pnpm release
+          version: pnpm version
+          commit: "chore: version packages"
+          title: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"

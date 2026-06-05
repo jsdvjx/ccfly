@@ -1,0 +1,28 @@
+{
+  "name": "ccfly-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Transport-agnostic surface-world toolkit for Claude Code sessions.",
+  "license": "MIT",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "workspaces": [
+    "packages/*",
+    "npm/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r --filter ./packages/* run build",
+    "build:go": "go -C go build -o ../bin/ccfly ./cmd/ccfly",
+    "build:binaries": "bash scripts/build-binaries.sh",
+    "typecheck": "pnpm -r --filter ./packages/* run typecheck",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "pnpm build && pnpm build:binaries && changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.0",
+    "typescript": "^5.7.0"
+  }
+}

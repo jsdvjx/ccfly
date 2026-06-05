@@ -1,0 +1,2 @@
+# Placeholder. CI cross-compiles `go/cmd/ccfly` (GOOS=linux GOARCH=arm64,
+# CGO_ENABLED=0) into `ccfly` here before publishing. Not checked in.
