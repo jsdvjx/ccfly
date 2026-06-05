@@ -31,6 +31,7 @@ import (
 
 	"github.com/ccfly/ccfly/go/internal/control"
 	"github.com/ccfly/ccfly/go/internal/mesh"
+	"github.com/ccfly/ccfly/go/internal/svc"
 )
 
 // version is overridden at build time via -ldflags.
@@ -52,6 +53,14 @@ func main() {
 	case "connect":
 		if err := runConnect(ctx, os.Args[2:]); err != nil {
 			log.Fatalf("connect: %v", err)
+		}
+	case "install":
+		if err := runInstall(os.Args[2:]); err != nil {
+			log.Fatalf("install: %v", err)
+		}
+	case "uninstall":
+		if err := runUninstall(os.Args[2:]); err != nil {
+			log.Fatalf("uninstall: %v", err)
 		}
 	case "version", "-v", "--version":
 		fmt.Println("ccfly", version)
@@ -134,6 +143,38 @@ func runConnect(ctx context.Context, args []string) error {
 	return mesh.Connect(ctx, target)
 }
 
+// runInstall installs `ccfly connect` as a persistent OS service (launchd/systemd).
+func runInstall(args []string) error {
+	fs := flag.NewFlagSet("install", flag.ExitOnError)
+	system := fs.Bool("system", false, "system-wide service (needs sudo; survives logout/reboot)")
+	claudeDir := fs.String("claude-dir", "", "Claude projects dir (default ~/.claude/projects)")
+	dry := fs.Bool("dry-run", false, "print what would be done; change nothing")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: ccfly install <host>/<code> [--system] [--claude-dir <dir>] [--dry-run]")
+		fs.PrintDefaults()
+	}
+	if len(args) < 1 || args[0] == "" {
+		fs.Usage()
+		return errors.New("missing <host>/<code>")
+	}
+	target := args[0]
+	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	return svc.Install(svc.Options{Target: target, System: *system, ClaudeDir: *claudeDir, DryRun: *dry})
+}
+
+// runUninstall removes the persistent service.
+func runUninstall(args []string) error {
+	fs := flag.NewFlagSet("uninstall", flag.ExitOnError)
+	system := fs.Bool("system", false, "remove the system-wide service (needs sudo)")
+	dry := fs.Bool("dry-run", false, "print what would be done; change nothing")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return svc.Uninstall(svc.Options{System: *system, DryRun: *dry})
+}
+
 func usage() {
 	fmt.Println(`ccfly — local Claude Code control service
 
@@ -146,6 +187,12 @@ Usage:
       service in-process, then hold the overlay tunnel open — one command serves
       + joins. --no-serve proxies to a separate "ccfly serve" instead. Loopback
       hosts use http.
+  ccfly install <host>/<code> [--system] [--claude-dir <dir>] [--dry-run]
+      Install ccfly connect as a persistent service (macOS launchd / Linux
+      systemd) so the device stays joined across logout / reboot / sleep.
+      --system = system-wide (sudo, survives logout). Default = user-level.
+  ccfly uninstall [--system]
+      Remove the service installed by "ccfly install".
   ccfly version
   ccfly help
 
