@@ -195,6 +195,11 @@ func dialOnce(ctx context.Context, st *State) error {
 				err := c.Ping(pctx)
 				cancel()
 				if err != nil {
+					// Dead/half-open conn (typically after the host sleeps): force
+					// the read side to error so dialOnce returns and the outer
+					// runTunnel loop reconnects promptly on wake. Without this,
+					// c.Read can block on the half-open TCP indefinitely.
+					c.CloseNow()
 					return
 				}
 			}
