@@ -33,10 +33,16 @@ import (
 	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
-// localControlPort is the loopback port the device's `ccfly serve` listens on,
-// and (by overlay convention) the port the cloud dials over the mesh. Override
-// via SetLocalControlPort before Connect() if `ccfly serve --port` differs.
+// localControlPort is the loopback port the device's `ccfly serve` listens on.
+// Override via SetLocalControlPort (CCFLY_LOCAL_PORT) if `ccfly serve --port`
+// differs. The overlay listener is always on overlayServicePort, so the cloud
+// dials a fixed overlay port regardless of the local one.
 var localControlPort = 7699
+
+// overlayServicePort is the FIXED overlay-side TCP port the device exposes its
+// control API on (overlayIP:7699) and that the cloud gateway dials. Decoupled
+// from localControlPort so a non-default local serve port still works.
+const overlayServicePort = 7699
 
 // SetLocalControlPort overrides the local `ccfly serve` target port that the
 // overlay TCP listener proxies to (and the overlay port it listens on).
@@ -263,7 +269,7 @@ func bringUpWG(ctx context.Context, st *State, c *websocket.Conn) (*wgSession, e
 		return nil, fmt.Errorf("mesh: wg up: %w", err)
 	}
 
-	ln, err := startOverlayProxy(ctx, tnet, overlayAddr, localControlPort)
+	ln, err := startOverlayProxy(ctx, tnet, overlayAddr, overlayServicePort, localControlPort)
 	if err != nil {
 		sess.close()
 		return nil, err
@@ -271,17 +277,17 @@ func bringUpWG(ctx context.Context, st *State, c *websocket.Conn) (*wgSession, e
 	sess.listener = ln
 
 	log.Printf("ccfly: wireguard up — overlay %s, proxy %s:%d → 127.0.0.1:%d",
-		overlayAddr, overlayAddr, localControlPort, localControlPort)
+		overlayAddr, overlayAddr, overlayServicePort, localControlPort)
 	return sess, nil
 }
 
 // startOverlayProxy listens on <overlay>:<port> inside the netstack overlay and
 // proxies every accepted connection to 127.0.0.1:<port> (the local control
 // service). Returns the listener so the caller can close it on teardown.
-func startOverlayProxy(ctx context.Context, tnet *netstack.Net, overlay netip.Addr, port int) (io.Closer, error) {
-	ln, err := tnet.ListenTCP(&net.TCPAddr{IP: overlay.AsSlice(), Port: port})
+func startOverlayProxy(ctx context.Context, tnet *netstack.Net, overlay netip.Addr, overlayPort, localPort int) (io.Closer, error) {
+	ln, err := tnet.ListenTCP(&net.TCPAddr{IP: overlay.AsSlice(), Port: overlayPort})
 	if err != nil {
-		return nil, fmt.Errorf("mesh: overlay listen %s:%d: %w", overlay, port, err)
+		return nil, fmt.Errorf("mesh: overlay listen %s:%d: %w", overlay, overlayPort, err)
 	}
 	go func() {
 		for {
@@ -289,7 +295,7 @@ func startOverlayProxy(ctx context.Context, tnet *netstack.Net, overlay netip.Ad
 			if err != nil {
 				return // listener closed (teardown) or fatal
 			}
-			go proxyConn(ctx, conn, port)
+			go proxyConn(ctx, conn, localPort)
 		}
 	}()
 	return ln, nil
