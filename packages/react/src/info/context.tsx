@@ -227,11 +227,12 @@ function Detail({ title, rows }: { title: string; rows?: Row3[] }) {
   )
 }
 
-// 既给抓屏路径(CardModule.Card,吃剥色文本 parse 出的 Ctx),也给 jsonl 路径(InfoSheet 直接调 ContextCard)。
-export const context: CardModule<Ctx> = { parse: parseContext, Card: ContextCard }
-
 // 给 InfoSheet 的 md 路径用:markdown → 结构化卡;解析失败回退 <MD>。
-export function ContextMd({ md }: { md: string }) {
+function ContextMd({ md }: { md: string }) {
   const data = parseContextMd(md)
   return data ? <ContextCard data={data} /> : <MD text={md} />
 }
+
+// 抓屏路径用 parse/Card(吃剥色文本);jsonl(viaJsonl)路径用 Md(吃 /cmdresult 返回的干净 markdown)。
+// 两条来源(抓屏剥色 / jsonl markdown)统一收敛到同一张 ContextCard。
+export const context: CardModule<Ctx> = { parse: parseContext, Card: ContextCard, Md: ContextMd }

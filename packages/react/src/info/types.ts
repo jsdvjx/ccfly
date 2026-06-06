@@ -6,4 +6,7 @@ import type { ComponentType } from 'react'
 export interface CardModule<T> {
   parse: (text: string) => T | null
   Card: ComponentType<{ data: T }>
+  // 可选:jsonl/markdown 路径(viaJsonl 命令,如 /context)的结构化渲染 —— 吃干净 markdown、
+  // 内部 parse 成结构卡(解析失败回退 <MD>)。缺省则 md 路径直接 <MD> 渲染原 markdown。
+  Md?: ComponentType<{ md: string }>
 }

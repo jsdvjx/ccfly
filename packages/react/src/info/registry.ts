@@ -7,6 +7,7 @@ import { mcp } from './mcp'
 import { doctor } from './doctor'
 import { hooks } from './hooks'
 import { skills } from './skills'
+import { context } from './context'
 
 // 一条命令的完整描述符 = 路由键 + 展示 + 分组 + 到达方式 + 模态性 + 卡模块。
 // 这张表是「斜杠命令 → 原生卡」的唯一真相:Palette(isInfoCmd)、App(cardFor)、InfoSheet(groupOf)全从它派生。
@@ -29,8 +30,11 @@ export const CARDS: CmdCard[] = [
   { cmd: '/stats', label: '统计', group: '会话信息', tabOnly: true, reach: { cmd: '/cost', rights: 1 }, modal: true, mod: stats },
   { cmd: '/config', label: '设置', group: '会话信息', tabOnly: true, reach: { cmd: '/config', esc: 2 }, modal: true, mod: settings }, // 搜索框:首次 Esc 仅清过滤,第二次才关面板
   // ── 独占单卡 ──
-  // 注:/context 已退出信息体系 —— 它运行时往 jsonl 写一条 isMeta markdown(## Context Usage),
-  // 直接流进消息流并由 blocks 渲染,InfoSheet 再弹是重复;故改回「普通命令发送」(Palette 确认后透传、ⓘ 直发)。
+  // /context:走 jsonl 通知路径(viaJsonl)——「发送命令后会收到通知」:发 /context 前取 transcript 游标,
+  // 提交命令,轮询 /cmdresult 拿那条 isMeta `## Context Usage` 干净 markdown,经 context.Md 渲成结构卡
+  // (parseContextMd → ContextCard,失败回退 <MD>)。esc:0=不停留面板、打印进流,故不乱按 Esc;modal:false。
+  // (它也仍会内联进消息流,但用户要的是点 /context 即弹的那张富卡,故重新接回信息体系。)
+  { cmd: '/context', label: '上下文', reach: { cmd: '/context', esc: 0 }, modal: false, viaJsonl: true, mod: context },
   { cmd: '/mcp', label: 'MCP', reach: { cmd: '/mcp' }, modal: true, mod: mcp },
   { cmd: '/doctor', label: '体检', reach: { cmd: '/doctor' }, modal: true, mod: doctor },
   { cmd: '/hooks', label: '钩子', reach: { cmd: '/hooks' }, modal: true, mod: hooks },
@@ -40,7 +44,7 @@ export const CARDS: CmdCard[] = [
 // ── 派生索引(唯一真相的三个投影)──
 const byCmd = new Map(CARDS.map((c) => [c.cmd, c]))
 export const cardFor = (cmd: string): CmdCard | undefined => byCmd.get(cmd) // App:命中即开 InfoSheet
-// Palette 入口 = 命中且非 tabOnly(/cost /status /mcp /doctor /hooks /skills;/context 已退出信息体系,走普通命令)。
+// Palette 入口 = 命中且非 tabOnly(/cost /status /context /mcp /doctor /hooks /skills)。
 export const isInfoCmd = (cmd: string): boolean => {
   const c = byCmd.get(cmd)
   return !!c && !c.tabOnly

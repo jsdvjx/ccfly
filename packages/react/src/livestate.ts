@@ -204,7 +204,15 @@ function hasIdlePrompt(term: Terminal): boolean {
 // 刻意不再用「❯+普通空格」或「非空缓冲+有 ❯ 行」做证据:见上方 reShellErr 处注释(xterm 会把重绘中的
 // NBSP 格渲染成普通空格,那两条会把正在重画的 claude 屏误判成 shell)。
 function shellEvidence(lines: string[]): boolean {
-  for (const ln of lines) {
+  // 关键:只扫屏幕「底部 prompt 区」(尾 6 行),绝不扫 scrollback / 对话正文。
+  // 真正表示「claude 没在跑」的 zsh 报错,紧贴 shell 提示符出现在屏底 —— 失败的
+  // `claude --resume`(PATH 缺失)、被打进 zsh 的斜杠命令("zsh: command not found: /context")。
+  // 而扫全缓冲会致命误判:编程会话里 claude 的输出 / 历史正文极常含「command not found」
+  // 「no such file or directory」(本仓库的 PATH 调试会话满屏皆是 —— 见 cc-5dea5258),
+  // 一个正在显示这类文字、但当帧没读到输入框边框(/cost 报告/工具输出/半重绘)的 live claude
+  // 屏会被误判成 offline → certain:true 覆盖 last-known → ControlBar 翻成「会话未在运行 /
+  // 启动会话」、斜杠按钮消失 → 用户发不了命令、信息卡也开不出来(本次修复的 bug 根因)。
+  for (const ln of tail(lines, 6)) {
     if (reShellErr.test(ln)) return true
   }
   return false

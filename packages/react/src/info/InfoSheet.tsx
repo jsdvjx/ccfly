@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react'
-import { sendKeys, tmuxName } from '../api'
 import { AnsiText, stripAnsi } from '../blocks/Ansi'
 import { MD } from '../components'
 import { cardFor, groupOf, type CmdCard } from './registry'
-import { useCapture, relTime, type Capture } from './useCapture'
+import { useCapture, useSweep, relTime, type Capture, type SweepState } from './useCapture'
 
 // 唯一面板 —— 取代旧 CostPanel + CmdSheet。Head + CardBody 被 single/tabs 共用;入口按 groupOf 长度分流。
 
@@ -20,10 +19,12 @@ function CardBody({ card, cap }: { card: CmdCard; cap: Capture }) {
       <div className="empty">未能打开「{card.label}」—— 可能被其他界面挡住或里世界未响应。点「刷新」重试,或「原始」看屏幕。</div>
     )
   }
-  // jsonl 路径:out 是干净 markdown。「原始」看源码;否则朴素 <MD> 渲染。
+  // jsonl 路径:out 是干净 markdown。「原始」看源码;否则优先用本卡的 Md(结构化卡,如 /context),
+  // 缺省朴素 <MD> 渲染。
   if (cap.md) {
     if (cap.raw) return <pre className="cmd-out">{cap.out || '(空)'}</pre>
-    return <MD text={cap.out} />
+    const Md = card.mod.Md
+    return Md ? <Md md={cap.out} /> : <MD text={cap.out} />
   }
   // 抓屏卡:结构化卡吃剥色文本(用自己的色);「原始」/解析失败回退用带色 AnsiText 渲染。
   const data = cap.raw ? null : card.mod.parse(stripAnsi(cap.out))
@@ -99,9 +100,22 @@ function SingleSheet({ host, sid, card, onClose }: { host: string; sid: string; 
   )
 }
 
-// 多卡(tabs):切 tab 换 card → useCapture 以 card.cmd 为键重跑 / 命中缓存;清场 Esc 次数由各卡 reach.esc 定。
-// 初始落在被点中的那张卡(/cost→用量、/status→状态);close 统一发 Esc 关里世界停留的面板。= 旧 CostPanel。
-function TabsSheet({
+// 扫页卡身:渲染某 tab 的已扫结果(结构卡);没扫到则按 phase 给 loading/offline/busy/未抓到。
+function SweepBody({ card, hit, phase }: { card: CmdCard; hit?: { data: unknown; raw: string }; phase: SweepState['phase'] }) {
+  if (hit) {
+    const Card = card.mod.Card // CardModule<any> → 吃任意 data
+    return <Card data={hit.data} />
+  }
+  if (phase === 'loading') return <div className="empty">加载中…</div>
+  if (phase === 'offline') return <div className="empty">会话未在运行</div>
+  if (phase === 'busy') return <div className="empty">⏳ 会话生成中,结束后点「刷新」重试</div>
+  return <div className="empty">未抓到「{card.label}」页 —— 点「刷新」重扫一遍。</div>
+}
+
+// 多卡(tabs):一次开 /cost 面板、后台 ← → 扫遍所有页(useSweep),全部抓好后切 tab 即时(读已抓结果、
+// 不再发命令)。= 重写旧 TabsSheet 的「切 tab 才抓」(覆盖网下不可靠 → 用户反馈「用量可以但没法切换」)。
+// 关闭无需再发 Esc:扫完已自行关掉面板、回到干净输入态。
+function SweepSheet({
   host,
   sid,
   tabs,
@@ -115,27 +129,44 @@ function TabsSheet({
   onClose: () => void
 }) {
   const [cur, setCur] = useState(start)
+  const { found, phase, run, ts } = useSweep(host, sid, tabs)
   const card = tabs[cur]
-  const cap = useCapture(host, sid, card, true)
-  const close = () => {
-    const n = card.reach.esc ?? 1 // 关里世界面板:Esc 次数取当前 tab 的 reach.esc(/config 搜索框=2,其余=1)
-    if (n > 0) sendKeys(host, tmuxName(sid), { keys: Array(n).fill('Escape') })
-    onClose()
-  }
+  const done = Object.keys(found).length
   return (
     <div className="sheet">
       <div className="sheet-box" onClick={(e) => e.stopPropagation()}>
-        <Head title={card.group!} cap={cap} onClose={close} />
+        <div className="sheet-h">
+          <span>{tabs[0].group}</span>
+          <div className="sheet-hbtns">
+            <button className="cbtn" onClick={() => run()}>刷新</button>
+            <button className="cbtn" onClick={onClose}>关闭</button>
+          </div>
+        </div>
         <div className="ctabs">
           {tabs.map((t, i) => (
-            <button key={t.cmd} className={'ctab' + (i === cur ? ' on' : '')} onClick={() => setCur(i)}>
+            <button
+              key={t.cmd}
+              className={'ctab' + (i === cur ? ' on' : '') + (found[t.cmd] ? '' : ' ctab-pending')}
+              onClick={() => setCur(i)}
+            >
               {t.label}
+              {!found[t.cmd] && phase === 'loading' ? ' …' : ''}
             </button>
           ))}
         </div>
-        <StatusBar cap={cap} />
+        {phase === 'loading' ? (
+          <div className="info-status loading">
+            <span className="info-spin" aria-hidden />
+            <span className="info-status-txt">正在浏览各页… {done}/{tabs.length}</span>
+          </div>
+        ) : ts ? (
+          <div className="info-status">
+            <span className="info-status-txt">刷新于 {relTime(ts)}</span>
+            <button className="info-status-refresh" onClick={() => run()}>刷新</button>
+          </div>
+        ) : null}
         <div className="sheet-list">
-          <CardBody card={card} cap={cap} />
+          <SweepBody card={card} hit={found[card.cmd]} phase={phase} />
         </div>
       </div>
     </div>
@@ -148,8 +179,9 @@ export function InfoSheet({ host, sid, cmd, onClose }: { host: string; sid: stri
   if (!card) return null
   const grp = groupOf(card)
   // key=cmd:换命令必重挂载,避免复用残留的 cur/缓存(即便当前总经 null 切换,也防未来「面板开着切命令」)。
+  // 多卡组(/cost 的会话信息:用量/状态/统计/设置)→ 扫页卡(一次开面板、← → 扫遍所有页、切 tab 即时)。
   if (grp.length > 1) {
-    return <TabsSheet key={card.cmd} host={host} sid={sid} tabs={grp} start={Math.max(0, grp.indexOf(card))} onClose={onClose} />
+    return <SweepSheet key={card.cmd} host={host} sid={sid} tabs={grp} start={Math.max(0, grp.indexOf(card))} onClose={onClose} />
   }
   return <SingleSheet key={card.cmd} host={host} sid={sid} card={card} onClose={onClose} />
 }

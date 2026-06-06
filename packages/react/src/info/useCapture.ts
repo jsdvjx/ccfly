@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { sendKeys, captureUntil, sleep, fetchState, fetchTranscript, fetchCmdResult, tmuxName } from '../api'
+import { sendKeys, captureUntil, fetchCapture, sleep, fetchState, fetchTranscript, fetchCmdResult, tmuxName } from '../api'
 import { storageKey } from '../config'
 import { stripAnsi } from '../blocks/Ansi'
 import type { CmdCard } from './registry'
@@ -187,4 +187,100 @@ export function useCapture(host: string, sid: string, card: CmdCard, tabs: boole
   }, [host, tsess, card.cmd, run])
 
   return { out, phase, raw, setRaw, md, run, ts, revalidating }
+}
+
+// ── 扫页式抓取(/cost 面板的 ← → 多 tab):一次开面板 → ← 到最左 → → 逐页扫,每屏用各 tab 的 parse 认页 ──
+// 为什么换掉「逐 tab 按需抓屏」(旧 TabsSheet):切 tab 要重发命令 + 重抓屏,覆盖网下每次都赌时序,常失败
+// (= 用户反馈「用量可以,但没法切换」)。claude 的 /cost 面板本身是一个 ← → 多页面板
+// (Settings/Status/Config/Usage/Stats),故:开一次面板,后台把所有页都浏览+抓+解析好,切 tab 即时
+// (读已抓结果,不再发命令)。= 用户诉求「点任一卡 → 后台自动把几页都浏览一遍并渲染」。
+export interface SweepState {
+  found: Record<string, { data: unknown; raw: string }> // key=tab.cmd → 该页 parse 结果 + 带色原文
+  phase: 'loading' | 'ok' | 'offline' | 'busy'
+  run: () => void
+  ts: number
+}
+
+export function useSweep(host: string, sid: string, tabs: CmdCard[]): SweepState {
+  const tsess = tmuxName(sid)
+  const [found, setFound] = useState<Record<string, { data: unknown; raw: string }>>({})
+  const [phase, setPhase] = useState<'loading' | 'ok' | 'offline' | 'busy'>('loading')
+  const [ts, setTs] = useState(0)
+  const alive = useRef(true)
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
+
+  const run = useCallback(() => {
+    setPhase('loading')
+    setFound({})
+    void (async () => {
+      // 0) 只挡 busy(claude 生成中,发命令会打断);offline 不挡 —— 客户端/设备的 offline 判定可能误报
+      //    (见 livestate 的 shellEvidence 修复),直接试着开面板更稳,真死会话顶多抓到空、降级空态。
+      const stt = await fetchState(host, tsess)
+      if (stt.kind === 'busy') {
+        if (alive.current) setPhase('busy')
+        return
+      }
+      // 1) 开 /cost 面板(用量/状态/配置/统计/设置同属这一个 ← → 面板)。
+      const ok = await sendKeys(host, tsess, { text: '/cost', enter: true })
+      if (!ok) {
+        if (alive.current) setPhase('offline')
+        return
+      }
+      await sleep(1300)
+      // 2) ← 到最左 tab(在最左继续 ← 是 no-op,安全),确保从头扫起。
+      for (let i = 0; i < 5; i++) {
+        await sendKeys(host, tsess, { keys: ['Left'] })
+        await sleep(110)
+      }
+      await sleep(300)
+      // 3) → 逐页扫;每屏剥色后让各 tab 的 parse 各试一遍(谁非空即是哪页),进度式回填 → tab 陆续点亮。
+      const acc: Record<string, { data: unknown; raw: string }> = {}
+      for (let step = 0; step < 7; step++) {
+        if (!alive.current) return
+        const raw = (await fetchCapture(host, tsess, 220, true)).replace(/\s+$/, '')
+        const clean = stripAnsi(raw)
+        let changed = false
+        for (const t of tabs) {
+          if (!acc[t.cmd]) {
+            const d = t.mod.parse(clean)
+            if (d != null) {
+              acc[t.cmd] = { data: d, raw }
+              changed = true
+            }
+          }
+        }
+        if (changed && alive.current) setFound({ ...acc })
+        if (Object.keys(acc).length >= tabs.length) break
+        if (step < 6) {
+          await sendKeys(host, tsess, { keys: ['Right'] })
+          await sleep(580)
+        }
+      }
+      // 4) 关面板回干净输入态(/cost 面板:一次 Esc 关;再补一次兜底残留菜单)。
+      await sendKeys(host, tsess, { keys: ['Escape'] })
+      await sleep(120)
+      await sendKeys(host, tsess, { keys: ['Escape'] })
+      if (alive.current) {
+        setFound({ ...acc })
+        setPhase('ok')
+        setTs(Date.now())
+      }
+    })()
+  }, [host, tsess, tabs])
+
+  // 首挂载跑一次(同 host|tsess 不重复)。
+  const ran = useRef('')
+  useEffect(() => {
+    const k = host + '|' + tsess
+    if (ran.current === k) return
+    ran.current = k
+    run()
+  }, [host, tsess, run])
+
+  return { found, phase, run, ts }
 }
