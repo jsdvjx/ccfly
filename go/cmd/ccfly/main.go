@@ -25,9 +25,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/ccfly/ccfly/go/internal/control"
 	"github.com/ccfly/ccfly/go/internal/mesh"
@@ -213,15 +216,45 @@ func envOr(key, def string) string {
 	return def
 }
 
-// ensureToolPath prepends common tool locations (Homebrew, /usr/local) to PATH so
-// `tmux` resolves even when ccfly runs as a service: launchd/systemd give a
-// minimal PATH (/usr/bin:/bin:…) that omits /opt/homebrew/bin, which made `ccfly
-// connect`'s /term silently fail (tmux not found → PTY exits → WS reconnect loop).
+// ensureToolPath resolves the user's interactive login shell PATH and applies it
+// as the process PATH so all child processes (tmux, claude, etc.) inherit the
+// same environment a user would get in a terminal.  When ccfly runs as a
+// launchd/systemd service it inherits only a bare PATH (/usr/bin:/bin/…) that
+// omits ~/.local/bin (where `npm i -g` tools like claude land) and
+// /opt/homebrew/bin.  The login-shell probe fixes that at startup rather than
+// wrapping every individual command.
+//
+// Fallback: if the probe fails for any reason (non-interactive env, $SHELL
+// unset, 5-second timeout) we prepend the well-known static extras so at least
+// Homebrew and /usr/local tools resolve.
 func ensureToolPath() {
-	const extra = "/opt/homebrew/bin:/usr/local/bin"
-	if p := os.Getenv("PATH"); p != "" {
-		os.Setenv("PATH", extra+":"+p)
-	} else {
-		os.Setenv("PATH", extra+":/usr/bin:/bin:/usr/sbin:/sbin")
+	const fallbackExtras = "/opt/homebrew/bin:/usr/local/bin"
+	current := os.Getenv("PATH")
+	if current == "" {
+		current = "/usr/bin:/bin:/usr/sbin:/sbin"
 	}
+
+	sh := os.Getenv("SHELL")
+	if sh == "" {
+		sh = "/bin/sh"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, sh, "-ilc", "echo $PATH")
+	cmd.Stderr = nil // suppress interactive shell noise (motd, prompts)
+	out, err := cmd.Output()
+
+	if err == nil {
+		loginPath := strings.TrimSpace(string(out))
+		// Sanity: must look like a PATH (contains at least one '/').
+		if strings.Contains(loginPath, "/") {
+			os.Setenv("PATH", loginPath)
+			log.Printf("ccfly: PATH resolved from login shell (%d entries)", strings.Count(loginPath, ":")+1)
+			return
+		}
+	}
+	os.Setenv("PATH", fallbackExtras+":"+current)
+	log.Printf("ccfly: PATH fallback (login shell probe failed), prepended %s", fallbackExtras)
 }
