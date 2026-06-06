@@ -1,5 +1,23 @@
 # @ccfly/react
 
+## 0.3.2
+
+### Patch Changes
+
+- Fix info cards (`/cost` `/status` `/mcp` `/doctor` `/hooks` `/skills`) showing
+  "未能打开 … 里世界未响应".
+
+  The device's `/capture?ansi=1` ran `tmux capture-pane -t <s> -e -S -N` — but `-e`
+  **without `-p`** makes tmux copy the screen into a paste buffer instead of printing it
+  to stdout, so the HTTP body came back empty. The InfoSheet polls an ansi capture for
+  every info command, so it always parsed an empty screen and gave up.
+
+  - **ccfly** (device): always pass `-p`, append `-e` only for `ansi=1` →
+    `tmux capture-pane -p -e`. (`/state` was already correct.)
+  - **@ccfly/react**: defensive fallback in `fetchCapture` — if an ansi capture returns
+    empty, refetch without ansi. Parsing always strips ANSI, so this is lossless (only the
+    raw "原始" view loses color) and makes info cards work against an older device too.
+
 ## 0.3.1
 
 ### Patch Changes
