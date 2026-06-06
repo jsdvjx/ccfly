@@ -24,14 +24,32 @@ export function AgentDock({ host, sid }: { host: string; sid: string }) {
   const [frame, setFrame] = useState(0)
   const [now, setNow] = useState(() => Date.now())
 
-  // 主代理状态(供 main 行):WS 镜像在线 → useLiveState;降级 → 回退 /state 轮询。
+  // 主代理状态(供 main 行 + 门控子代理轮询):WS 镜像在线 → useLiveState;降级 → 回退 /state 轮询。
   const liveSt = useLiveState()
   const degraded = useLiveDegraded()
   const [polledSt, setPolledSt] = useState<CtrlState>({ kind: 'input' })
   const st = degraded ? polledSt : liveSt
 
-  // 运行中子代理列表:WS 派生不了(它要按「启动↔完成事件」配对扫主 jsonl),故 /subagents 轮询恒保留。
+  // 运行中子代理列表来自 /subagents(扫主 jsonl 配对「启动↔完成」事件,权威、带 toolUseId 供钻入)。
+  // 屏幕只有 `↓ to manage` 一行提示(按 ↓ 才弹管理视图、不常驻),没有完整列表 → 列表本身读屏派生不了。
+  // 但「何时去拉」可由 WS 实时态门控,消灭「空闲也每 2s 恒轮」(= 用户反馈「subagents 一直请求后端」根因):
+  //   · 子代理只在主代理 busy 期间产生;workflow 后台跑可能跨到 idle 仍在跑 → 已知有 agent 时继续盯。
+  //   · 故仅当 (busy ‖ 已知有 agent 在跑) 时轮询;空闲且无 agent → 完全不轮(绝大多数时间就是这态)。
+  const shouldPollAgents = st.kind === 'busy' || agents.length > 0
+
+  // 打开时拉一次:捕获「进来时已在跑」的子代理 / 后台 workflow(此刻可能正 idle,门控不会主动轮)。
   useEffect(() => {
+    let alive = true
+    fetchRunningAgents(host, sid).then((a) => alive && setAgents(a)).catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [host, sid])
+
+  // 持续轮询:仅在 shouldPollAgents 为真时。刚转真(如 busy 起)立即拉一次,别等首个 interval
+  //（短 busy 期可能漏掉 workflow 启动);转假(回到空闲且无 agent)即停轮。
+  useEffect(() => {
+    if (!shouldPollAgents) return
     let alive = true
     const poll = () => {
       fetchRunningAgents(host, sid).then((a) => alive && setAgents(a)).catch(() => {})
@@ -42,7 +60,7 @@ export function AgentDock({ host, sid }: { host: string; sid: string }) {
       alive = false
       clearInterval(t)
     }
-  }, [host, sid])
+  }, [host, sid, shouldPollAgents])
 
   // main 行状态:仅降级时轮询 /state;WS 在线靠 useLiveState。
   useEffect(() => {
