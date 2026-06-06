@@ -51,8 +51,14 @@ var (
 	reEnterTo  = regexp.MustCompile(`(?i)Enter\s+to\s`)
 	reSessOnly = regexp.MustCompile(`(?i)\bs\s+to\s+use\s+this\s+session`)
 	reWS       = regexp.MustCompile(`\s+`)
-	// 输入框上下边框(claude 的 "─────"):用来定位里世界输入框。
+	// 输入框上下边框(claude 的 "─────"):claude 空闲输入框的上下沿,纯 ─ 一长串。
+	// shell(zsh)的 '❯' 提示行没有这种边框,故 border 是「这是 claude 框」的强证据之一。
 	reBorder = regexp.MustCompile(`^─{6,}\s*$`)
+	// 输入框底栏提示行(空闲框下沿,如 "? for shortcuts · ← for agents" / "… to send" / "shift+tab")。
+	// 与 livestate.ts 的 reInputHint 逐条对齐。busy 行 "esc to interrupt" 已被 reBusy 先吃、
+	// select 行 "Enter to …/esc to cancel" 已先判 select,故此 hint 只在「非 busy、非 select」后
+	// 用于「确认是 claude 输入框」,不抢 busy/select。shell 提示行不含这些字样。
+	reInputHint = regexp.MustCompile(`(?i)(\?\s*for\s+shortcuts|for\s+agents|\bto\s+send\b|shift\s*\+\s*tab)`)
 	// 输入建议行 / 真实输入行都以 "❯" 起头,但:
 	//   真实输入行 = "❯" + U+00A0( ,不间断空格)+ 已输入文本
 	//   建议行     = "❯" + 普通空格(U+0020)+ 建议全文(渲染在输入框上边框正上方那一格,空闲时该格为空行)
@@ -192,8 +198,33 @@ func detectState(rawText string) ctrlState {
 		}
 	}
 
-	// 默认:可输入。建议已在入口从带色抓屏解析好(parseSuggestANSI)。
-	return ctrlState{Kind: "input", Suggest: suggest}
+	// 默认分支:既非 busy 也非 select。此前这里无条件返回 Kind:"input" —— 这正是 bug 根因:
+	// 一个停在 zsh '❯ ' 提示符的 tmux pane(claude 没在跑)也被判成 input,表世界给出发送框,
+	// 用户的斜杠命令被打进 zsh("zsh: command not found: context")。
+	//
+	// 修正:只有「确认这是 claude 的输入框」才判 input,否则判 offline(pane 里不是 claude,
+	// 表世界据此显示「会话未在运行 / 启动会话」而非发送框)。
+	// 判据(与 livestate.ts 对齐):claude 输入框必有 纯 ─── 边框(reBorder)、或底栏提示行
+	// (reInputHint),后端额外可靠的是 ❯+NBSP 的当前输入行(reInputLine);三者任一命中即确认。
+	// shell 的 '❯' 用普通空格且无边框/提示,三条都不命中 → offline。
+	if isClaudeInput(lines) {
+		// 建议已在入口从带色抓屏解析好(parseSuggestANSI)。
+		return ctrlState{Kind: "input", Suggest: suggest}
+	}
+	return ctrlState{Kind: "offline"}
+}
+
+// isClaudeInput 判断「当前屏是否确为 claude 的输入框」(用于默认分支区分 claude-idle vs shell 提示符)。
+// 命中任一即确认:纯 ─── 边框(reBorder)/ 底栏提示行(reInputHint)/ ❯+NBSP 当前输入行(reInputLine)。
+// 与 livestate.ts 的 hasIdlePrompt 逐条对齐;NBSP 一路为后端独有(tmux 原文里 NBSP 可靠,浏览器侧
+// xterm 可能把 U+00A0 归一成普通空格,故客户端只用 border/hint,不用 NBSP)。
+func isClaudeInput(lines []string) bool {
+	for _, ln := range lines {
+		if reBorder.MatchString(ln) || reInputHint.MatchString(ln) || reInputLine.MatchString(ln) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseSuggestANSI — 从带 ANSI 的抓屏里解析里世界「输入建议」(Prompt suggestions)。

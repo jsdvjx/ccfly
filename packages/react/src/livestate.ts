@@ -37,12 +37,26 @@ const reWS = /\s+/g
 // "❯")而漏认,hasIdlePrompt 就返 false → detectState 标 certain:false → store 保留上一个 busy →
 // 看着「卡死」。放宽后只要看到输入框就确凿判 input(与后端 ctrlstate.go「看到框即空闲」对齐),
 // 同时仍要求确凿看到框(非空缓冲),保留抗 reflow/重连瞬态的能力。
-const reInputPrompt = /^\s*❯(?:[\u0020\u00a0].*)?\s*$/
+// claude 空闲输入框的「上下边框」:纯 ─ 一长串(框上沿/下沿)。与 ctrlstate.go 的 reBorder 对齐。
+// 取代旧的 reInputPrompt(认「裸 ❯ 或 ❯+空格」为空闲框):但 shell(zsh)的 '❯ ' 提示符
+// 正是「❯+普通空格」→ 被误判成 claude 空闲框,用户斜杠命令被打进 zsh(本次修复的 bug 根因)。
+// 改用 border —— shell 提示行没有 ─── 边框,据此区分 claude 框 vs shell 提示符。
+const reBorder = /^─{6,}\s*$/
 // 输入框底栏提示行(空闲框下沿,如 "? for shortcuts · ← for agents" / "… to send" / "shift+tab")。
 // 第二条独立的「确认空闲」信号:输入行因渲染瞬态没匹配上 reInputPrompt 时,尾部见此提示也算确凿空闲。
 // busy 行是 "esc to interrupt"(已被 reBusy 先吃),select 行是 "Enter to …/esc to cancel"(已先判 select),
 // 故此 hint 只在「非 busy、非 select」时生效,不抢 busy/select。
 const reInputHint = /(\?\s*for\s+shortcuts|for\s+agents|\bto\s+send\b|shift\s*\+\s*tab)/i
+// ── shell(非 claude)证据:用于「未确认 claude 框」时区分 stable-shell vs 半重绘瞬态 ──
+// 客户端只信「zsh 报错行」这一条不可被重绘伪造的强信号(command not found / no such file or directory)。
+// 为何不用「行首 ❯+空格」或「非空缓冲+有 ❯ 行」这类结构启发(它们曾在此判 offline):xterm 在半重绘
+// 期会把 claude 输入行那格 NBSP 当 NULL→渲染成普通空格(translateToString 用 WHITESPACE_CELL_CHAR),
+// 于是一个正在重画的 claude 屏会短暂呈现 '❯ '(普通空格)或稀疏 '❯'+陈旧文本 —— 被这些启发误判成 shell,
+// 把上一帧的 busy 硬翻成 offline(F7 违规)。zsh 报错行不会被 claude 的 reflow 伪造,故只认它:F1(含
+// "command not found")仍翻 offline,F7(无报错行)落不进来 → certain:false → store 保留 last-known。
+// 注:device 端(ctrlstate.go)读 tmux 原文,NBSP 可靠,故那边靠 ❯+NBSP 的 reInputLine 即可,无此问题、
+// 也无此启发;两端保持对齐(都不含 bare-❯/稀疏缓冲启发)。
+const reShellErr = /(command not found|no such file or directory)/i
 // 输入行定位:行首 "❯" 后跟「NBSP(U+00A0)或普通空格(U+0020)」。
 // 为何放宽:后端吃 tmux 原文,NBSP 与普通空格泾渭分明,故 reInputLine 死认 NBSP 即可区分
 // 真实输入行 vs 建议/历史气泡(后两者用普通空格)。但浏览器侧文本来自 xterm 的
@@ -150,28 +164,48 @@ export interface DetectResult {
   certain: boolean
 }
 
-// 「确认看到空闲输入框」:可见屏内存在以 "❯" 起头的输入行(reInputPrompt),或尾部存在输入框底栏
-// 提示行(reInputHint,如 "? for shortcuts")。任一命中即认作确凿空闲。
-// 这是把状态判成 input(idle)的硬门槛 —— 仅「这一帧没读到 busy」不算空闲(可能是 reflow/空缓冲)。
+// 「确认这是 claude 的空闲输入框」:可见屏内存在 纯 ─── 边框(reBorder,框上沿/下沿),
+// 或尾部存在输入框底栏提示行(reInputHint,如 "? for shortcuts · ← for agents")。任一命中即确认。
+// 这是把状态判成 input(idle)的硬门槛 —— 仅「这一帧没读到 busy」不算空闲(可能是 reflow/空缓冲/shell)。
 //
-// 两路信号互为兜底:静态满屏(/context 等本地命令跑完)时,输入框 "❯" 行确实在屏,prompt 路命中;
-// 万一某帧 "❯" 行因重绘瞬态没匹配上,底栏 "? for shortcuts" 提示一般还在,hint 路兜住,不再误判
-// 不确凿而保留 busy。两路都只在「非 busy(reBusy 先吃)、非 select(reFooter+opts/effort 先判)」
-// 后才被 detectState 调用,故不会抢 busy/select。
+// 关键修正:旧实现还认「裸 ❯ 或 ❯+空格」(reInputPrompt)为空闲框,但 shell(zsh)的 '❯ ' 提示符
+// 正是这形态 → 误判成 claude 空闲框,用户斜杠命令被打进 zsh。现仅认 border/hint —— 这俩是 claude 框
+// 独有、shell 提示符没有的结构。客户端不靠 ❯+NBSP(后端独有的可靠信号):xterm 可能把 NBSP 归一成
+// 普通空格,据此区分会失效;border/hint 在浏览器侧稳定可见。
+//
+// 两路信号互为兜底:静态满屏(/context 等本地命令跑完)时,框上下沿 ─── 在屏,border 路命中;
+// 万一某帧边框因重绘瞬态没匹配上,底栏 "? for shortcuts" 提示一般还在,hint 路兜住。两路都只在
+// 「非 busy(reBusy 先吃)、非 select(reFooter+opts/effort 先判)」后才被调用,故不抢 busy/select。
 function hasIdlePrompt(term: Terminal): boolean {
   const buf = term.buffer.active
   const { start, end } = visibleRange(term)
   for (let y = start; y < end; y++) {
     const line = buf.getLine(y)
     if (!line) continue
-    if (reInputPrompt.test(line.translateToString(true))) return true
+    if (reBorder.test(line.translateToString(true))) return true
   }
-  // 兜底:尾部若见输入框底栏提示行,同样算确凿空闲。
+  // 兜底:尾部若见输入框底栏提示行,同样算确认是 claude 框。
   const last = end - 1
   for (let y = last; y >= start && y >= last - 6; y--) {
     const line = buf.getLine(y)
     if (!line) continue
     if (reInputHint.test(line.translateToString(true))) return true
+  }
+  return false
+}
+
+// 「这帧是不是一个稳定的 shell(非 claude)屏」:仅在 hasIdlePrompt 为 false(没看到 claude 框)时问。
+// 用途:把默认分支的「未确认 claude 框」进一步劈成两类 ——
+//   (a) stable shell  → 确凿 offline(claude 没在跑,表世界显示「会话未在运行 / 启动会话」);
+//   (b) 半重绘/空缓冲瞬态 → 不确凿,保留 last-known(关键:别把 busy 误降成 offline,见 F7)。
+// 唯一证据 = zsh 报错行("command not found" / "no such file or directory")。这是 shell 独有、claude
+// 的 reflow 绝不会伪造的强信号:F1(真 shell,含报错)→ true → offline;F7(半重绘的 claude 屏,
+// 可能短暂呈现 '❯ '/稀疏残屏但没有报错行)→ false → 不确凿、保留 last-known(busy 不被误翻 offline)。
+// 刻意不再用「❯+普通空格」或「非空缓冲+有 ❯ 行」做证据:见上方 reShellErr 处注释(xterm 会把重绘中的
+// NBSP 格渲染成普通空格,那两条会把正在重画的 claude 屏误判成 shell)。
+function shellEvidence(lines: string[]): boolean {
+  for (const ln of lines) {
+    if (reShellErr.test(ln)) return true
   }
   return false
 }
@@ -282,12 +316,21 @@ export function detectState(term: Terminal): DetectResult {
     }
   }
 
-  // 走到这里:既无 busy,也无 select。是不是真「空闲可输入」?
-  // 只有确认看到清晰输入框(❯ 输入行存在)才算确凿空闲;否则这帧很可能是 reflow / 半重绘 /
-  // 空缓冲的瞬态(尺寸跳动、刚重连),不能据此把状态降级成 input —— 标 certain:false,
-  // 让 store 保留 last-known(尤其别把 busy 误降成 input)。
-  const idle = hasIdlePrompt(term)
-  return { state: { kind: 'input', suggest }, certain: idle }
+  // 走到这里:既无 busy,也无 select。三岔(与 ctrlstate.go 的默认分支对齐,客户端多一层瞬态保护):
+  //   1) 确认是 claude 框(hasIdlePrompt:border/hint)→ 确凿空闲 input。
+  //   2) 否则、但有稳定 shell 证据(shellEvidence)→ 确凿 offline:claude 没在跑(停在 zsh '❯ '),
+  //      表世界据此显示「会话未在运行 / 启动会话」而非发送框。这正是「斜杠命令被打进 zsh」bug 的修复。
+  //   3) 既非 claude 框、又无 shell 证据(空缓冲 / 半重绘 / reflow 瞬态,F7)→ 不确凿:
+  //      返回一个 provisional input 帧但 certain:false,让 store 保留 last-known(别把 busy 误降级)。
+  // 之所以把 offline 也判 certain:true:offline 是「确凿不是 claude」的稳定结论,需要覆盖 last-known
+  // 才能让 ControlBar 从旧的 input/busy 切到「启动会话」;而瞬态(3)绝不给 certain,故不会误翻。
+  if (hasIdlePrompt(term)) {
+    return { state: { kind: 'input', suggest }, certain: true }
+  }
+  if (shellEvidence(lines)) {
+    return { state: { kind: 'offline' }, certain: true }
+  }
+  return { state: { kind: 'input', suggest }, certain: false }
 }
 
 // ── zustand store ──
