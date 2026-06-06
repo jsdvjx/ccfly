@@ -77,6 +77,8 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
     let everConnected = false // 是否曾握手成功过(首连失败立即降级;已连过则走宽限)
     let gateTimer = 0 // 探活轮询定时器:非 live 会话不连 /term,周期性探活,变 live 即接上镜像
     let disposed = false // effect 已清理标记(异步探活回来后据此中止,避免对已卸载的 term 连边)
+    let lastOutputAt = Date.now() // 最近一帧 WS 输出时刻;busy 看门狗据此判镜像是否静默冻结
+    let watchdog = 0 // busy 卡死看门狗定时器
 
     // 断连宽限:瞬时断连 / 重连不应立刻翻 degraded(那会让消费方切到 /state 轮询、丢 last-known)。
     // 真正长时间连不上(> GRACE)才降级,回退 /state 轮询(ControlBar/AgentDock 的兜底)。
@@ -166,6 +168,7 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
           },
           onOutput: (data) => {
             term.write(data)
+            lastOutputAt = Date.now()
             if (conn && conn.ready()) setDegraded(false)
           },
           // 断连不立刻降级、不 resetLive:保留 last-known(尤其 busy)。开宽限定时器,
@@ -220,6 +223,18 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
         })
     }
     ensureConn()
+
+    // busy 卡死看门狗:健康的 busy claude 每 ~1s 刷 spinner(= 持续来帧)。若状态 busy 却 >5s 没来过帧,
+    // 说明 WS 镜像静默冻结(半死连接:既不来新帧、又没触发 onClose)→ detectState 不再跑、状态永远卡在 busy
+    // (= 用户反馈「中断了网页还在 thinking」的根因)。此时翻 degraded:ControlBar/AgentDock 回退 /state 轮询
+    // 重新对齐真实态(中断后设备早回 input);一旦镜像恢复来帧,onOutput 会把 degraded 翻回 false、回到实时态。
+    watchdog = window.setInterval(() => {
+      if (disposed) return
+      const s = useLiveStore.getState()
+      if (s.state.kind === 'busy' && !s.degraded && Date.now() - lastOutputAt > 5000) {
+        setDegraded(true)
+      }
+    }, 2000)
 
     // 容器尺寸变化(显隐切换会改宽高)→ refit + 通知里世界把 pane 钉到新列行。
     const ro = new ResizeObserver(() => {
@@ -291,6 +306,7 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
 
     return () => {
       disposed = true
+      if (watchdog) clearInterval(watchdog)
       if (gateTimer) clearTimeout(gateTimer)
       if (recalcTimer) clearTimeout(recalcTimer)
       if (settleTimer) clearTimeout(settleTimer)
