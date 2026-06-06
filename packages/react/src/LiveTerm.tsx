@@ -16,7 +16,7 @@ import '@xterm/xterm/css/xterm.css'
 import { connect, type TtydConn } from './ttyd'
 import { detectState, useLiveStore } from './livestate'
 import { liveTermHandle } from './liveconn'
-import { tmuxName } from './api'
+import { tmuxName, fetchState } from './api'
 
 // 隐藏容器尺寸:够大以容纳 claude 模态/spinner 不折行(列数≈宽/字宽)。固定一份「桌面级」尺寸,
 // 让 detectState 在稳定布局上工作(与可见 ttyd 端尺寸无关,各连接各自 resize 自己的 pane —— 见下「遗留」)。
@@ -75,6 +75,8 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
     let settleTimer = 0 // settle 窗口结束后做一次「干净重算」的定时器
     let degradeTimer = 0 // 断连后「宽限期」定时器:宽限内重连成功则取消,长时间连不上才真降级
     let everConnected = false // 是否曾握手成功过(首连失败立即降级;已连过则走宽限)
+    let gateTimer = 0 // 探活轮询定时器:非 live 会话不连 /term,周期性探活,变 live 即接上镜像
+    let disposed = false // effect 已清理标记(异步探活回来后据此中止,避免对已卸载的 term 连边)
 
     // 断连宽限:瞬时断连 / 重连不应立刻翻 degraded(那会让消费方切到 /state 轮询、丢 last-known)。
     // 真正长时间连不上(> GRACE)才降级,回退 /state 轮询(ControlBar/AgentDock 的兜底)。
@@ -183,14 +185,41 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
         },
         {
           cwd: cwd || '',
-          resumeCmd: 'claude --resume ' + sid,
+          // 被动镜像只 attach、绝不 spawn 里世界:故意不传 resumeCmd。
+          // 原因(本次修复):对非 live 会话,/term 的 `tmux new-session -A -s cc-x claude --resume <sid>`
+          // 会新建会话跑 claude --resume,而它常常立刻退出(claude 不在 service PATH、或该 sid 正被别处占用),
+          // 于是 PTY EOF → WS 断 → ttyd 退避重连 → 再 spawn → 再退出……会话忽生忽灭,degraded 来回翻,
+          // ControlBar 在「发送框 ↔ 会话未运行」间抖,斜杠按钮跟着闪、点不中。
+          // 现在镜像只对「已在跑」的会话 attach(见下 ensureConn 的探活门),起会话改由「启动会话」按钮走 /start 显式做。
           cols,
           rows,
         },
       )
       liveTermHandle.conn = conn // 暴露给统一发键层(WS INPUT 轨)
     }
-    startConn()
+
+    // 探活门:被动镜像绝不自动 spawn —— 仅当该 tmux 会话「已在跑」(/state 非 offline)才连 /term(attach)。
+    // 非 live → 不连、保持降级,让 ControlBar 稳定显示「会话未运行 / 启动会话」(由按钮走 /start 显式启动);
+    // 每 2.5s 探一次,一旦会话变 live(用户点了启动、或别端起了它)即自动接上镜像。一旦连上就交给 ttyd 自管重连。
+    const ensureConn = () => {
+      if (disposed || conn) return
+      fetchState(host, tmuxName(sid))
+        .then((stt) => {
+          if (disposed || conn) return
+          if (stt.kind !== 'offline') {
+            startConn() // 已在跑 → attach(不 spawn)
+          } else {
+            setDegraded(true) // 明确降级:消费方走 /state 轮询,稳定显示离线态(不抖)
+            gateTimer = window.setTimeout(ensureConn, 2500)
+          }
+        })
+        .catch(() => {
+          if (disposed || conn) return
+          setDegraded(true)
+          gateTimer = window.setTimeout(ensureConn, 2500)
+        })
+    }
+    ensureConn()
 
     // 容器尺寸变化(显隐切换会改宽高)→ refit + 通知里世界把 pane 钉到新列行。
     const ro = new ResizeObserver(() => {
@@ -261,6 +290,8 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
     applyHidden()
 
     return () => {
+      disposed = true
+      if (gateTimer) clearTimeout(gateTimer)
       if (recalcTimer) clearTimeout(recalcTimer)
       if (settleTimer) clearTimeout(settleTimer)
       if (degradeTimer) clearTimeout(degradeTimer)
