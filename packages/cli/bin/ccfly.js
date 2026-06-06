@@ -107,6 +107,21 @@ function main() {
     return;
   }
 
+  // POSIX: ensure the platform binary is executable before spawning. npm only
+  // sets the executable bit on a package's own declared `bin` entries; our
+  // platform subpackages declare none (to avoid clashing with this `ccfly`
+  // launcher's name), and `pnpm publish` normalizes other files to 0644 — so the
+  // shipped binary installs as 0644 and spawnSync would fail with EACCES
+  // (notably under `npx ccfly`). Restore +x best-effort; ignore failures
+  // (read-only FS / Windows) and let the spawn proceed / surface its own error.
+  if (process.platform !== "win32") {
+    try {
+      require("node:fs").chmodSync(binPath, 0o755);
+    } catch {
+      /* read-only FS or insufficient perms: fall through to spawn */
+    }
+  }
+
   // Default subcommand is `serve` when invoked with no args: `npx ccfly`.
   const forwarded = process.argv.slice(2);
   const args = forwarded.length > 0 ? forwarded : ["serve"];
