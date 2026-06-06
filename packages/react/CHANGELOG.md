@@ -1,5 +1,28 @@
 # @ccfly/react
 
+## 0.3.1
+
+### Patch Changes
+
+- Two session-control fixes for cloud / remote use:
+
+  - **@ccfly/react** — the hidden live-terminal mirror now ATTACHES ONLY: it no longer
+    auto-spawns `claude --resume` when you merely open a session. Auto-spawn made a
+    non-live session blink live/dead (the spawned process exits, the WS reconnects and
+    respawns…), so the input bar flapped between the send box and "会话未运行" and the
+    slash button flickered out of reach. Starting a session is now exclusively the
+    explicit "启动会话" button's job (`/start`); the mirror gates its `/term` connection
+    on liveness. Live sessions are unaffected (clean attach).
+
+  - **ccfly + @ccfly/react** — the control-state detector (device `ctrlstate.go` and
+    client `livestate.ts`, kept in lock-step) now distinguishes claude's input box from
+    a shell `❯` prompt. A tmux pane sitting at a zsh shell (claude exited) was detected
+    as `input`, so the web showed a send box and slash commands were typed into the shell
+    ("zsh: command not found: context"). Both detectors now require positive claude
+    evidence — a pure `─{6,}` border, a hint line (`? for shortcuts` / `← for agents` /
+    `to send` / `shift+tab`), or (device-only, reliable) the `❯`+NBSP input line — before
+    reporting `input`; otherwise the pane is treated as offline ("会话未在运行 / 启动会话").
+
 ## 0.3.0
 
 ### Minor Changes
