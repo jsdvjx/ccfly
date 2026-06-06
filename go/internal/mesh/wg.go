@@ -212,6 +212,9 @@ type wgSession struct {
 
 // close brings the device down and releases the netstack TUN + listener.
 // Safe to call once; order: stop accepting, signal recv funcs, close device.
+// NOTE: s.dev.Close() calls s.tun.Close() internally (wireguard-go device
+// teardown always closes the TUN); calling s.tun.Close() separately would
+// double-close netTun.done → "close of closed channel" panic.
 func (s *wgSession) close() {
 	if s == nil {
 		return
@@ -223,8 +226,10 @@ func (s *wgSession) close() {
 		_ = s.bind.Close()
 	}
 	if s.dev != nil {
-		s.dev.Close() // also calls bind.Close() internally; idempotent
+		s.dev.Close() // closes the TUN (netstack) internally; do NOT call s.tun.Close() after this
+		return
 	}
+	// dev was never created (early error path): close the TUN directly.
 	if s.tun != nil {
 		_ = s.tun.Close()
 	}
