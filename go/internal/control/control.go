@@ -142,12 +142,14 @@ func handleCapture(w http.ResponseWriter, r *http.Request) {
 	if _, err := strconv.Atoi(lines); err != nil {
 		lines = "2000"
 	}
-	// ?ansi=1 → 保留 TUI 原始 ANSI 上色(展示/原始回退用);默认 -p(无色,解析/判定吃这个)。
-	colorFlag := "-p"
+	// 一律 -p(打印到 stdout);?ansi=1 时**追加** -e(保留 TUI 原始 ANSI 上色,展示/原始回退用)。
+	// 关键:-e 必须与 -p 同用 —— 单独 `capture-pane -e`(无 -p)会把内容写进 tmux paste buffer 而非 stdout,
+	// 于是 HTTP 返回空串,信息卡(/cost /status /mcp …)抓屏永远拿不到内容 → 解析失败 →「未能打开」。
+	args := []string{"capture-pane", "-t", sess, "-p", "-S", "-" + lines}
 	if r.URL.Query().Get("ansi") == "1" {
-		colorFlag = "-e"
+		args = append(args, "-e")
 	}
-	out, err := exec.Command("tmux", "capture-pane", "-t", sess, colorFlag, "-S", "-"+lines).CombinedOutput()
+	out, err := exec.Command("tmux", args...).CombinedOutput()
 	if err != nil {
 		ctrlErr(w, 404, "tmux: "+strings.TrimSpace(string(out)))
 		return

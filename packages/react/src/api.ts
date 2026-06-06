@@ -332,7 +332,15 @@ export async function fetchCapture(_host: string, tsess: string, lines = 100, an
     const u = xb() + '/capture?session=' + encodeURIComponent(tsess) + '&lines=' + lines + (ansi ? '&ansi=1' : '')
     const r = await xf(u)
     if (!r.ok) return ''
-    return r.text()
+    const t = await r.text()
+    // 兼容修复:老设备的 /capture?ansi=1 走 `tmux capture-pane -e`(缺 -p)会写进 buffer、stdout 返回空,
+    // 导致所有信息卡(/cost /status /mcp …)抓屏永远拿到空串 → 解析失败 → 「未能打开」。
+    // 兜底:ansi 抓屏若返回空,回退到无色抓屏(解析一律先 stripAnsi,无损;仅「原始」视图少了颜色)。
+    if (ansi && t === '') {
+      const r2 = await xf(xb() + '/capture?session=' + encodeURIComponent(tsess) + '&lines=' + lines)
+      if (r2.ok) return r2.text()
+    }
+    return t
   } catch {
     return ''
   }
