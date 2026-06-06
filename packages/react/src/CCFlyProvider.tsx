@@ -38,7 +38,11 @@ function resolve(c: CCFlyProviderConfig): CCFlyConfig {
   // 终端 WS 默认与 REST 同前缀(ccfly 自带 /term 与其它端点同一个 Go 服务)。
   const wsBaseUrl = (c.wsBaseUrl ?? baseUrl).replace(/\/$/, '')
   const tmuxName = c.tmuxName ?? ((sid: string) => 'cc-' + sid.slice(0, 8))
-  const resumeCmd = c.resumeCmd ?? ((sid: string) => 'claude --resume ' + sid)
+  // 默认经用户「交互登录 shell」跑 claude:claude 常装在 ~/.local/bin(由 ~/.zshrc 注入 PATH),只有交互 shell
+  // 的 PATH 有它。设备 /start 把本串交给 tmux(经 sh -c 运行),$SHELL 在设备上展开成用户登录 shell、-ilc 加载
+  // rc → claude 可解析;否则直接 `claude --resume` 用 tmux server 继承的 service PATH(无 claude)→ 命令立刻退出
+  // → 会话刚建就死(「启动会话」点了没反应)。消费方可整体覆盖 resumeCmd。
+  const resumeCmd = c.resumeCmd ?? ((sid: string) => `$SHELL -ilc 'claude --resume ${sid}'`)
   // 默认无外部终端直链:ccfly /term 是 WS,不可直接开新标签。降级时 UI 据空串隐藏「打开终端」。
   // 消费方若另起了可开标签的网页终端可覆盖此项。
   const terminalUrl = c.terminalUrl ?? (() => '')

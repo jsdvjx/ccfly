@@ -54,7 +54,8 @@ function defaultConfig(): CCFlyConfig {
     tmuxName: (sid) => 'cc-' + sid.slice(0, 8),
     // 默认无外部终端直链(ccfly /term 是 WS,不可直接开新标签);降级时 UI 据空串隐藏「打开终端」。
     terminalUrl: () => '',
-    resumeCmd: (sid) => 'claude --resume ' + sid,
+    // 经用户交互登录 shell 跑 claude(加载 ~/.zshrc 的 PATH,claude 常在 ~/.local/bin);详见 CCFlyProvider.resolve。
+    resumeCmd: (sid) => `$SHELL -ilc 'claude --resume ${sid}'`,
     storagePrefix: 'ccfly:',
   }
 }

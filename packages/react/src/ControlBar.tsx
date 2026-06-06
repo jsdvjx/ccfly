@@ -4,7 +4,7 @@ import { useLiveState, useLiveDegraded } from './livestate'
 import { sendAct } from './sendkeys'
 import { SlashPalette } from './Palette'
 import { isInfoCmd as registryIsInfoCmd } from './info/registry'
-import { storageKey } from './config'
+import { storageKey, getConfig } from './config'
 
 // ── 还原原版 TUI:工作中 spinner/动词/计时;空闲态不再轮换 tips(已删)──────────
 const SPIN = ['✶', '✳', '✺', '✻', '✽', '✻', '✺', '✳'] // 脉动星(仿 claude 的 loading 动画)
@@ -290,7 +290,7 @@ export function ControlBar({
         <button
           className="cbtn primary"
           onClick={() =>
-            startSession(host, tsess, cwd || '', 'claude --resume ' + sid).then((ok) => {
+            startSession(host, tsess, cwd || '', getConfig().resumeCmd(sid)).then((ok) => {
               flash(ok ? '已启动,稍候…' : '启动失败')
               setTimeout(poll, 1000)
             })
