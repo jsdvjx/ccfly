@@ -1,12 +1,19 @@
 // sendkeys.ts —— 统一发键层(双轨):把「往里世界送东西」收口到一处,按内容选通道。
 //
 // 两条轨:
-//   1) 文本 / 回车(text、enter)—— 走 ttyd WS 的 INPUT 帧(conn.sendInput,'0'+data)。
-//      这是「打字」语义:直接把字符灌进 pane 的 stdin,毫秒级、无需后端中转。
-//      回车作为「提交」时,等价于在文本尾部追加 "\r"(CR);claude TUI 与 tmux 都按 Enter 处理。
-//   2) 语义键(keys: ['Escape'|'Up'|'Down'|'Left'|'Right'|'Enter'|'C-c'...])—— 走 /sendkeys(后端 tmux send-keys)。
-//      方向键/Esc/^C 这类「控制键」用 tmux 的具名键最稳(转义序列各终端不一,后端具名映射是权威),不走 WS 裸字节。
-//      注意:keys 里若出现 'Enter',这是「把 Enter 当一次按键」(如菜单确认),仍走 /sendkeys —— 与「文本+enter 提交」区分。
+//   1) 纯文本(text、无 enter)—— 走 ttyd WS 的 INPUT 帧(conn.sendInput,'0'+data)。
+//      「打字」语义:直接把字符灌进 pane 的 stdin,毫秒级、无需后端中转。
+//   2) 语义键(keys) 或「提交」(enter:true)—— 走 /sendkeys(后端 tmux send-keys)。
+//      方向键/Esc/^C 这类「控制键」用 tmux 的具名键最稳(转义序列各终端不一,后端具名映射是权威)。
+//      提交(text+enter,如发消息/斜杠命令)也走这里:后端先 `send-keys -l -- text` 再发**独立的** `Enter`。
+//
+// 为什么「提交」不走 WS 而走 /sendkeys(关键修复):
+//   WS 轨把 "text\r" 作为「一帧」灌进 attach 端 PTY,字节几乎同刻到达。tmux 的 assume-paste-time
+//   (默认 1ms)会把这种「瞬时一大串」判作**粘贴**,而 claude TUI 开了 bracketed-paste(DECSET 2004),
+//   于是被包进 \e[200~…\e[201~ → claude 把文本(连同那个 \r)当**粘贴内容塞进输入框、并不提交**。
+//   表现:输入框里有字、却「发不出去」。改走 /sendkeys 后,文本与 Enter 是**两次独立的 send-keys**,
+//   Enter 是真正的按键事件(不触发粘贴启发),claude 正常提交。
+//   附带收益:/sendkeys 是普通 HTTP POST,经云网关/反代比 WS 双向桥接更稳(与能正常拉取的 transcript GET 同路)。
 //
 // 降级(liveDegraded:WS 没连上 / 未握手 / 还没收到输出):一切都走 /sendkeys(后端把 text/enter/keys 都能发)。
 //   —— 这正是 P1+P2 之前的老路径,保留为兜底,确保 WS 不可用时控件仍能驱动里世界。
@@ -29,17 +36,19 @@ function wsUsable(): boolean {
 }
 
 // 统一发送。
-//  - 降级 或 含 keys(语义键)→ 整条走 /sendkeys(后端能同时处理 text/enter/keys,顺序与老路径一致)。
-//  - 否则(仅 text/enter,WS 可用)→ 走 WS INPUT 帧:text 原样灌入,enter 追加 "\r"。
+//  - 含 keys(语义键)、含 enter(提交)、或 WS 不可用 → 走 /sendkeys(后端 tmux send-keys;提交时文本与 Enter 分两次发,可靠提交)。
+//  - 否则(纯文本、无 enter、WS 可用)→ 走 WS INPUT 帧:字符原样灌入 stdin(低延迟「打字」)。
 export async function sendAct(host: string, tsess: string, body: SendBody): Promise<boolean> {
   const hasKeys = !!(body.keys && body.keys.length)
-  // 语义键 或 WS 不可用 → 后端轨(老路径,完全兼容)。
-  if (hasKeys || !wsUsable()) {
+  // 语义键 / 提交(enter)/ WS 不可用 → 后端轨。
+  // enter 必走后端:WS 的 "text\r" 一帧会被 tmux 当粘贴(见顶部注释)→ claude 不提交;
+  // 后端 send-keys 把 Enter 作为独立按键发,才真正提交。
+  if (hasKeys || body.enter || !wsUsable()) {
     return sendKeys(host, tsess, body)
   }
-  // WS 轨:纯文本/回车直灌 stdin。
+  // WS 轨:纯文本(无 enter)直灌 stdin —— 单字符/增量打字,不涉及提交。
   const conn = liveTermHandle.conn!
-  const payload = (body.text || '') + (body.enter ? '\r' : '')
+  const payload = body.text || ''
   if (payload === '') return true
   try {
     conn.sendInput(payload)
