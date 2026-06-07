@@ -33,6 +33,7 @@
               ▼   baseUrl (HTTP / WS)
 ━━━ 表世界 · @ccfly/react ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     消息流 · 工具卡 · diff · 权限确认 · 输入
+    富选择卡(模型 · 力度 · 权限) · 图片上传 · /compact 进度
     实时终端镜像 · 子代理 · workflow
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
@@ -43,6 +44,7 @@
 - **镜像,而非抓屏。** 界面由 Claude 本就写下的结构化 jsonl 构建 —— 真实的消息、工具调用、diff、权限确认 —— 不是从终端截下来的像素。
 - **天生抗断连。** 会话活在 `tmux` 里。掉线、锁屏、稍后再连 —— 任务继续跑,滚动历史完整无缺。
 - **自带终端,开箱即用。** ccfly 提供**自己的**终端 WebSocket(一个真实 PTY 跑 `tmux new-session -A`,帧协议兼容 ttyd)。实时终端镜像**无需任何外部 ttyd**。
+- **原生富控件。** 斜杠菜单渲染成真正的选择器 —— 切换模型与思考力度、回应权限确认、实时看 `/compact` 进度 —— 还能把图片直接粘贴 / 拖拽 / 上传进会话。
 - **两层,干净拆分。** 一个极小的 Go 控制服务(`ccfly`) + 一个 React 组件库(`@ccfly/react`)。可单用,可合用。
 - **传输层无关。** 默认只绑 loopback。你可以打隧道、走 mesh,或在前面套一层带鉴权的反代 —— ccfly 只负责「渲染与操控」一个会话。
 - **单二进制,零运行时依赖。** CLI 通过 npm 分发预编译的 Go 二进制(`npx ccfly`),按平台解析,无 postinstall 下载。
@@ -87,7 +89,7 @@ export function App() {
 ```
 
 - `<CCFlyProvider>` 把控制服务端点(以及存储 / tmux 命名)注入子树。
-- `<SessionView>` 渲染一个 Claude Code 会话 —— 消息流、工具卡、diff、权限确认、输入,以及实时终端镜像(走 ccfly 自带的 `/term`)。
+- `<SessionView>` 渲染一个 Claude Code 会话 —— 消息流、工具卡、diff、权限确认、富选择菜单(模型 / 力度 / …)、图片与文件上传、输入,以及实时终端镜像(走 ccfly 自带的 `/term`)。
 - `<CCFlyHosts>` 在根上挂一次浮层宿主(代码阅读器、子代理栈、workflow 详情、图片灯箱)。
 
 ## 🧠 工作原理
@@ -113,7 +115,7 @@ export function App() {
 | 分组 | 端点 |
 | --- | --- |
 | **会话数据** | `GET /transcript[/stream]` · `GET /subtranscript[/stream]` · `GET /subagents` · `GET /workflow` · `GET /workflowagent[/stream]` · `GET /cmdresult` · `GET /image` · `GET /info` · `GET /state` |
-| **操控** | `POST /sendkeys` · `POST /start` |
+| **操控** | `POST /sendkeys` · `POST /start` · `POST /upload`(图片/文件 → 会话 cwd) |
 | **终端** | `GET /term`(WebSocket,兼容 ttyd) |
 | **兜底 / 健康** | `GET /capture`(抓屏,用于非 jsonl 会话) · `GET /healthz` |
 

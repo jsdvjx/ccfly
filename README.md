@@ -33,6 +33,7 @@ It does **not** scrape the screen. It mirrors the *inner world* — the jsonl tr
               ▼   baseUrl (HTTP / WS)
 ━━━ surface world · @ccfly/react ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     transcript · tool cards · diffs · permission prompts · input
+    rich selects (model · effort · permission) · image upload · /compact progress
     live terminal mirror · subagents · workflows
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
@@ -43,6 +44,7 @@ It does **not** scrape the screen. It mirrors the *inner world* — the jsonl tr
 - **Mirror, don't scrape.** The UI is built from the structured jsonl Claude already writes — real messages, tool calls, diffs, and permission prompts — not from terminal screen-grabs.
 - **Detach-safe by design.** Sessions live in `tmux`. Drop your connection, lock your phone, reconnect later — the run continues and the scrollback is intact.
 - **Batteries-included terminal.** ccfly serves its **own** terminal WebSocket (a real PTY running `tmux new-session -A`, ttyd-compatible frames). The live terminal mirror needs **no external ttyd**.
+- **Rich, native controls.** Slash menus become real pickers — switch model & thinking effort, answer permission prompts, watch `/compact` progress live — and paste, drag, or upload images straight into the session.
 - **Two layers, cleanly split.** A tiny Go control service (`ccfly`) + a React component library (`@ccfly/react`). Use one, or both.
 - **Transport-agnostic.** Runs on loopback by default. Tunnel it, mesh it, or put your own authenticating proxy in front — ccfly only cares about *rendering and controlling* a session.
 - **Single binary, zero runtime deps.** The CLI ships prebuilt Go binaries over npm (`npx ccfly`), resolved per-platform with no postinstall download.
@@ -87,7 +89,7 @@ export function App() {
 ```
 
 - `<CCFlyProvider>` injects the control-service endpoint (plus storage / tmux naming) into the subtree.
-- `<SessionView>` renders one Claude Code session — transcript, tool cards, diffs, permission prompts, input, and the live terminal mirror (via ccfly's own `/term`).
+- `<SessionView>` renders one Claude Code session — transcript, tool cards, diffs, permission prompts, rich select menus (model / effort / …), image & file upload, input, and the live terminal mirror (via ccfly's own `/term`).
 - `<CCFlyHosts>` mounts the overlay hosts once at the root (code reader, subagent stack, workflow detail, image lightbox).
 
 ## 🧠 How it works
@@ -113,7 +115,7 @@ The control service exposes a small, stable HTTP/WS surface. Highlights:
 | Group | Endpoints |
 | --- | --- |
 | **Session data** | `GET /transcript[/stream]` · `GET /subtranscript[/stream]` · `GET /subagents` · `GET /workflow` · `GET /workflowagent[/stream]` · `GET /cmdresult` · `GET /image` · `GET /info` · `GET /state` |
-| **Control** | `POST /sendkeys` · `POST /start` |
+| **Control** | `POST /sendkeys` · `POST /start` · `POST /upload` (image/file → session cwd) |
 | **Terminal** | `GET /term` (WebSocket, ttyd-compatible) |
 | **Fallback / health** | `GET /capture` (screen scrape, non-jsonl sessions) · `GET /healthz` |
 
