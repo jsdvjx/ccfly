@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.4.6
+
+### Patch Changes
+
+- Report a stable machine fingerprint (hardware UUID — Linux /etc/machine-id, macOS IOPlatformUUID — with a persisted ~/.ccfly/machine-id fallback) during no-code pairing, so re-installing/re-pairing the same machine reuses its existing device instead of spawning duplicates.
+
 ## 0.4.5
 
 ### Patch Changes

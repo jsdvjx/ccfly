@@ -282,11 +282,12 @@ func ensurePaired(ctx context.Context, scheme, host, version string) (*State, er
 func pairStart(ctx context.Context, scheme, host, pubkey, version string) (*pairStartResp, error) {
 	hostname, _ := os.Hostname()
 	body, _ := json.Marshal(map[string]string{
-		"pubkey":   pubkey,
-		"os":       runtime.GOOS,
-		"arch":     runtime.GOARCH,
-		"version":  version,
-		"hostname": hostname,
+		"pubkey":     pubkey,
+		"os":         runtime.GOOS,
+		"arch":       runtime.GOARCH,
+		"version":    version,
+		"hostname":   hostname,
+		"machine_id": machineID(), // 稳定机器指纹:云端据此去重,同机重配对复用同一设备
 	})
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
