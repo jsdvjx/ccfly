@@ -340,14 +340,39 @@
 .tx-body--asst { margin: 2px 0; }
 .tx-body--asst .md { font-size: 14px; }
 
-/* 思考块:整块 dim 降对比;字数徽标弱化 */
-.tx-think-cnt {
-  flex: none;
-  margin-left: auto;
-  font: 11px ui-monospace, Menlo, monospace;
-  color: #5a6473;
+/* 思考块(仿 TUI):无卡壳/边框,整块 dim 内联;✻ 星标 + dim 标题,正文斜体带左竖线 */
+.tx-think { margin: 6px 0; }
+.tx-think-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  cursor: pointer;
+  color: var(--mut);
+  user-select: none;
 }
-.tx-think-body { opacity: 0.62; }
+.tx-think-head:active { opacity: 0.7; }
+.tx-think-star { flex: none; font-size: 13px; line-height: 1; color: #9a86c4; } /* ✻ 思考紫,弱化 */
+.tx-think-label { flex: none; font-size: 13px; color: var(--mut); }
+.tx-think-brief {
+  flex: 1;
+  min-width: 0;
+  color: #5a6473;
+  font: 12px ui-monospace, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tx-think-chev { flex: none; margin-left: auto; color: #5a6473; font-size: 12px; width: 1em; text-align: center; }
+.tx-think--open .tx-think-chev { margin-left: 0; }
+/* 正文:dim 斜体 + 左竖线缩进(对齐 TUI 内联思考),星标列对齐 */
+.tx-think-body {
+  margin: 2px 0 2px 6px;
+  padding-left: 11px;
+  border-left: 2px solid #2e2942;
+  opacity: 0.62;
+  font-style: italic;
+}
 .tx-think-body .md { font-size: 13px; color: var(--mut); }
 .tx-think-body .md strong,
 .tx-think-body .md h1,
@@ -1539,6 +1564,8 @@
   animation: bs-pulse 1.1s ease-in-out infinite;
 }
 .wfc-wait { margin-top: 6px; font: 12px ui-monospace, Menlo, monospace; color: var(--mut); opacity: 0.8; }
+/* 拉取失败的占位:红字、不淡化(区别于「载入中」的灰淡占位,让永久 loading 变成明确的错状态) */
+.wfc-wait--err { color: var(--red); opacity: 1; }
 
 /* phase 小节:组头(可折叠)+ 组内 agent 行容器 */
 .wfc-ph { margin-top: 8px; }
@@ -1627,3 +1654,143 @@
 .wfc-f { font: 600 11px ui-monospace, Menlo, monospace; color: #cbd3e1; font-variant-numeric: tabular-nums; }
 .wfc-f-k { color: var(--mut); font-weight: 400; margin-right: 5px; }
 .wfc-f--model { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+/* ── StructuredResultCard(src-)· 结构化结果富兜底卡。复用 .kv/.kv-row/.kv-k/.kv-v 与 .pill;
+   只追加极薄的 .src- 钩子(表格语义 / 横滚防溢出 / 列表 / 折叠小节)。移动端安全:表格包横滚容器。 ── */
+.src { display: flex; flex-direction: column; gap: 8px; }
+/* 头部来源标识药丸(复用 .pill 基样,仅压字号/弱化)。 */
+.src-tag { margin-left: 6px; font-weight: 600; }
+/* 表格:.kv 同款卡面(bg2 + 边框 + 圆角),内部横向滚动容器防移动端溢出。 */
+.src-scroll { width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; background: var(--bg2); border: 1px solid var(--bd); border-radius: 10px; }
+.src-tbl { width: 100%; border-collapse: collapse; font: 13px ui-monospace, Menlo, monospace; }
+.src-th { text-align: left; padding: 7px 12px; color: var(--mut); font: 600 11px system-ui; white-space: nowrap; border-bottom: 1px solid var(--bd); background: var(--bg2); position: sticky; top: 0; }
+.src-tr + .src-tr .src-td { border-top: 1px solid var(--bd); }
+.src-td { padding: 7px 12px; color: var(--fg); vertical-align: top; overflow-wrap: anywhere; max-width: 280px; }
+.src-tr:nth-child(even) .src-td { background: rgba(255, 255, 255, 0.015); }
+/* 状态视图:药丸 + 其余字段 kv。 */
+.src-status { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.src-kv { width: 100%; }
+/* 字符串列表:搜索族列表观感(项目符号 + 等宽)。.kv 同款卡面盛放。 */
+.src-list { list-style: none; margin: 0; padding: 4px 0; display: flex; flex-direction: column; background: var(--bg2); border: 1px solid var(--bd); border-radius: 10px; overflow: hidden; }
+.src-li { display: flex; gap: 8px; padding: 5px 12px; font: 13px ui-monospace, Menlo, monospace; color: var(--fg); }
+.src-li + .src-li { border-top: 1px solid var(--bd); }
+.src-li-m { color: var(--mut); flex: 0 0 auto; }
+.src-li-t { overflow-wrap: anywhere; min-width: 0; }
+/* 卡内折叠小节(与 mt-sec 同款,自前缀以免跨文件耦合)。 */
+.src-sec { margin-top: 2px; }
+.src-sec-h { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 2px; background: none; border: 0; color: var(--mut); font: 12px system-ui; cursor: pointer; text-align: left; }
+.src-sec-h:active { color: var(--fg); }
+.src-sec-chev { font-size: 10px; flex: 0 0 auto; }
+.src-sec-body { padding-top: 2px; }
+
+/* ── 批次4 杂项工具族(MiscTools)· 前缀 mx-(SlashCommand) nbr-(NotebookRead)──
+   一律 extends 既有基座观感(.bs-/.pill/.kv),只追加极薄钩子;移动端无横向溢出(等宽块横滚、长文 anywhere 折行)。 */
+
+/* SlashCommand:头部命令药丸 + 内联参数;正文参数等宽块 + 折叠产出。 */
+.mx-brief { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+/* 命令药丸:青族(exec)等宽,贴 claude TUI 的 /命令 观感。 */
+.mx-cmd { flex: 0 0 auto; font: 700 12px ui-monospace, Menlo, monospace; color: #7fe0ea; background: rgba(77, 208, 225, 0.14); border: 1px solid rgba(77, 208, 225, 0.4); border-radius: 8px; padding: 1px 8px; letter-spacing: 0.2px; }
+/* 内联参数:弱化单行,过长省略(完整在下方 .mx-argbox)。 */
+.mx-args { min-width: 0; color: var(--mut); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 参数完整体:等宽块,横向滚动防溢出。 */
+.mx-argbox { font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--fg); background: #0c0e13; border: 1px solid var(--bd); border-radius: 8px; padding: 7px 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: pre; }
+/* 卡内折叠小节(与 mt-sec/src-sec 同款,自前缀以免跨文件耦合)。 */
+.mx-sec { margin-top: 2px; }
+.mx-sec-h { display: flex; align-items: center; gap: 6px; width: 100%; padding: 6px 2px; background: none; border: 0; color: var(--mut); font: 12px system-ui; cursor: pointer; text-align: left; }
+.mx-sec-h:active { color: var(--fg); }
+.mx-sec-chev { font-size: 10px; flex: 0 0 auto; }
+.mx-sec-body { padding-top: 2px; }
+
+/* NotebookRead:头部 basename + 单元计数;正文逐单元(code/markdown)。 */
+.nbr-brief { display: inline-flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.nbr-base { min-width: 0; font-weight: 600; color: #cbd3e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nbr-cnt { flex: 0 0 auto; }
+/* 单元列表:逐单元卡片,纵向堆叠。 */
+.nbr-cells { display: flex; flex-direction: column; gap: 8px; }
+.nbr-cell { display: flex; flex-direction: column; gap: 4px; }
+.nbr-cell-h { display: flex; align-items: center; gap: 6px; }
+/* 单元类型药丸:code 青、markdown 紫(与 file 族图标色呼应)。 */
+.nbr-ct { flex: 0 0 auto; font: 700 10px ui-monospace, Menlo, monospace; letter-spacing: 0.3px; }
+.nbr-ct--code { background: rgba(77, 208, 225, 0.14); color: #7fe0ea; border-color: rgba(77, 208, 225, 0.4); }
+.nbr-ct--md { background: rgba(183, 148, 246, 0.16); color: #c9b3f8; border-color: rgba(183, 148, 246, 0.4); }
+.nbr-cell-n { color: var(--mut); font: 11px ui-monospace, Menlo, monospace; }
+.nbr-md { font-size: 13.5px; line-height: 1.55; overflow-wrap: anywhere; }
+.nbr-empty, .nbr-foot { color: var(--mut); font-size: 12px; padding: 4px 2px; }
+
+/* ════════════════ McpResourceCard(mr-)· MCP 资源卡 ════════════════ */
+/* 复用基座 .bs-*(accent=mcp 琥珀条)+ 设计系统 .pill / .kv;仅追加极薄 .mr- 钩子。
+   移动端安全:uri 走 overflow-wrap:anywhere 的等宽块,无定宽表格,纵向滚动。 */
+
+/* ── 卡内折叠小节(与 mt-/mx-/src- 同款,本前缀私有副本)── */
+.mr-sec { margin-top: 8px; }
+.mr-sec-h {
+  display: flex; align-items: center; gap: 5px;
+  width: 100%; padding: 5px 2px;
+  background: none; border: none; cursor: pointer;
+  font: 600 11px ui-monospace, Menlo, monospace;
+  color: var(--mut); text-align: left;
+}
+.mr-sec-h:active { color: var(--fg); }
+.mr-sec-chev { flex: none; width: 12px; color: var(--mut); }
+.mr-sec-body { margin-top: 4px; }
+
+/* ── Read 头部:server·uri(复用 mc- 同款配色)── */
+.mr-name { display: inline-flex; align-items: baseline; gap: 5px; min-width: 0; flex-wrap: wrap; }
+.mr-srv { color: var(--amber); font-weight: 600; }
+.mr-sep { color: #5a6473; }
+.mr-tool {
+  color: #cbd3e1;
+  font: 12px ui-monospace, Menlo, monospace;
+  overflow-wrap: anywhere; min-width: 0;
+}
+.mr-tag { flex: none; }
+
+/* ── List 头部 brief ── */
+.mr-list-brief { display: inline-flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.mr-total { flex: none; }
+.mr-srv-cnt { flex: none; font: 600 10px ui-monospace, Menlo, monospace; color: var(--mut); opacity: 0.85; }
+
+/* ── List 主体:server 分组 ── */
+.mr-list { display: flex; flex-direction: column; gap: 10px; }
+.mr-grp {
+  border: 1px solid var(--bd); border-radius: 10px;
+  background: var(--bg2); overflow: hidden;
+}
+.mr-grp-h {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--bd);
+  background: rgba(255, 207, 107, 0.06);
+}
+.mr-grp-i { flex: none; font-size: 13px; line-height: 1; }
+.mr-grp-srv {
+  font: 600 12px ui-monospace, Menlo, monospace;
+  color: var(--amber);
+  overflow-wrap: anywhere; min-width: 0;
+}
+.mr-grp-cnt { flex: none; margin-left: auto; }
+.mr-grp-body { display: flex; flex-direction: column; }
+
+/* ── 单条资源行 ── */
+.mr-res { padding: 7px 10px; border-top: 1px solid var(--bd); }
+.mr-res:first-child { border-top: none; }
+.mr-res-top { display: flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.mr-res-name {
+  font: 600 13px system-ui;
+  color: var(--fg);
+  overflow-wrap: anywhere; min-width: 0;
+}
+.mr-mime { flex: none; }
+.mr-uri {
+  display: block; margin-top: 3px;
+  padding: 2px 7px; border-radius: 6px;
+  background: #0c0e13; border: 1px solid var(--bd);
+  color: #9aa4b2;
+  font: 11px ui-monospace, Menlo, monospace;
+  overflow-wrap: anywhere;
+}
+.mr-res-desc {
+  margin-top: 4px;
+  font-size: 12px; color: var(--mut);
+  overflow-wrap: anywhere;
+}

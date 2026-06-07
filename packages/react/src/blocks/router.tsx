@@ -7,11 +7,17 @@ import { ThinkingBlock, UserBubble, AssistantBody } from './TextShell'
 import { SystemNotice, classifyUserItem } from './SystemNotice'
 import { ImageChip, ImageUuidProvider } from './ImageBlock'
 import { ReadCard, WriteCard, EditCard, MultiEditCard, NotebookEditCard } from './FileTools'
-import { BashCard, BashOutput } from './ExecTools'
+import { BashCard, BashOutput, KillShell } from './ExecTools'
 import { GrepCard, GlobCard, LsCard } from './SearchTools'
 import { TodoCard, AgentCard, PlanCard, AskUserQuestionCard, SkillCard, McpCard, GenericCard } from './MetaTools'
 import { WebFetchCard, WebSearchCard } from './WebTools'
+import { SlashCommandCard, NotebookReadCard } from './MiscTools'
 import { WorkflowCard } from './WorkflowCard'
+// MCP 资源富卡:两个一方「资源」工具(无 mcp__ 前缀,故 McpCard 不接;此前落 StructuredResultCard/GenericCard)。
+import { McpResourceCard } from './McpResourceCard'
+// 结构化结果富兜底:GenericCard 之前先试 tryStructuredResult(命中 result/input 的结构化形态
+// → 表/状态/列表富渲染;否则卡内就地回落 GenericCard,故 router 行为对未结构化工具不变)。
+import { tryStructuredResult } from './StructuredResultCard'
 
 // 工具卡组件签名:统一收 { block } + 可选 depth(AgentCard 据此决定是否还能继续递归子代理)。
 type ToolCardFn = (props: { block: Block; depth?: number }) => ReactNode
@@ -23,8 +29,12 @@ export const TOOL_ROUTER: Record<string, ToolCardFn> = {
   Edit: EditCard,
   MultiEdit: MultiEditCard,
   NotebookEdit: NotebookEditCard,
+  NotebookRead: NotebookReadCard,
   Bash: BashCard,
   BashOutput: BashOutput,
+  // 终止后台 shell:复用 ExecTools.KillShell(✕ 标题的 Bash 卡)。两个历史命名都接住。
+  KillShell: KillShell,
+  KillBash: KillShell,
   Grep: GrepCard,
   Glob: GlobCard,
   LS: LsCard,
@@ -34,9 +44,17 @@ export const TOOL_ROUTER: Record<string, ToolCardFn> = {
   ExitPlanMode: PlanCard,
   AskUserQuestion: AskUserQuestionCard,
   Skill: SkillCard,
+  // Claude 主动调用斜杠命令(/review、/compact …);与「用户手敲斜杠」(SystemNotice)区分。
+  SlashCommand: SlashCommandCard,
   WebFetch: WebFetchCard,
   WebSearch: WebSearchCard,
   Workflow: WorkflowCard,
+  // MCP 资源工具:list(列资源)/ read(读单个资源)同→McpResourceCard;名字无 mcp__ 前缀,精确命中先于 mcp__ 分支。
+  // 注册带/不带 Tool 后缀两套别名,任一命名都接住(schema 实名为 Resources 复数 / Resource 单数)。
+  ListMcpResourcesTool: McpResourceCard,
+  ReadMcpResourceTool: McpResourceCard,
+  ListMcpResources: McpResourceCard, // 防御性无后缀别名
+  ReadMcpResource: McpResourceCard, // 防御性无后缀别名
 }
 
 // tool_use → 卡:精确命中优先 → mcp__ 前缀 McpCard → GenericCard 兜底。depth 透传给 AgentCard。
@@ -45,7 +63,9 @@ export function renderToolUse(block: Block, depth = 0): ReactNode {
   const exact = TOOL_ROUTER[name]
   if (exact) return exact({ block, depth })
   if (name.startsWith('mcp__')) return <McpCard block={block} />
-  return <GenericCard block={block} />
+  // 兜底:先试结构化富卡;命中不了由其内部回落 GenericCard(?? 退化为无害恒真,见 StructuredResultCard)。
+  const rich = tryStructuredResult(block)
+  return rich ?? <GenericCard block={block} />
 }
 
 // 块级路由:thinking → ThinkingBlock;tool_use → renderToolUse。text 由消息壳自行处理(用户气泡/助手正文)。

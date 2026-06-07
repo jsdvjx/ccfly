@@ -19,14 +19,21 @@
 //   —— 这正是 P1+P2 之前的老路径,保留为兜底,确保 WS 不可用时控件仍能驱动里世界。
 //
 // 调用方:ControlBar 的 act()、可见终端的键盘处理,统一经此。返回 Promise<boolean>(是否成功送达)。
-import { sendKeys } from './api'
+import { sendKeys, type SendResult } from './api'
 import { liveTermHandle } from './liveconn'
 import { useLiveStore } from './livestate'
+
+// 透出 SendResult({ok, kind?}):sendAct/sendKeys 的返回类型,消费方据此区分成功 / 409 拒发 / 失败。
+export type { SendResult } from './api'
 
 export interface SendBody {
   text?: string
   keys?: string[]
   enter?: boolean
+  // clear:仅「原子提交」(配 enter:true)时置真 —— 后端打字前先清空里世界输入行(根因 A)。
+  // 只在 enter:true 时有意义,而 enter:true 已强制走 /sendkeys(下方),故 clear 随 body 自动转发,
+  // 无 WS 专属代码。纯 WS 打字轨(无 enter)从不带 clear。
+  clear?: boolean
 }
 
 // WS 是否此刻可用作发键通道:有 conn、已握手 ready、且 store 未判降级。
@@ -35,24 +42,25 @@ function wsUsable(): boolean {
   return !!conn && conn.ready() && !useLiveStore.getState().degraded
 }
 
-// 统一发送。
+// 统一发送。返回 SendResult({ok, kind?}):提交可能被 server floor 以 409 拒发(带真实 kind),
+// ControlBar 据此冒真实原因并保留草稿;非提交轨(纯打字成功)恒返回 {ok:true}。
 //  - 含 keys(语义键)、含 enter(提交)、或 WS 不可用 → 走 /sendkeys(后端 tmux send-keys;提交时文本与 Enter 分两次发,可靠提交)。
 //  - 否则(纯文本、无 enter、WS 可用)→ 走 WS INPUT 帧:字符原样灌入 stdin(低延迟「打字」)。
-export async function sendAct(host: string, tsess: string, body: SendBody): Promise<boolean> {
+export async function sendAct(host: string, tsess: string, body: SendBody): Promise<SendResult> {
   const hasKeys = !!(body.keys && body.keys.length)
   // 语义键 / 提交(enter)/ WS 不可用 → 后端轨。
   // enter 必走后端:WS 的 "text\r" 一帧会被 tmux 当粘贴(见顶部注释)→ claude 不提交;
-  // 后端 send-keys 把 Enter 作为独立按键发,才真正提交。
+  // 后端 send-keys 把 Enter 作为独立按键发,才真正提交。clear 仅配 enter 出现,故只在这条轨上传到后端。
   if (hasKeys || body.enter || !wsUsable()) {
     return sendKeys(host, tsess, body)
   }
-  // WS 轨:纯文本(无 enter)直灌 stdin —— 单字符/增量打字,不涉及提交。
+  // WS 轨:纯文本(无 enter)直灌 stdin —— 单字符/增量打字,不涉及提交,故 clear 在此恒不出现。
   const conn = liveTermHandle.conn!
   const payload = body.text || ''
-  if (payload === '') return true
+  if (payload === '') return { ok: true }
   try {
     conn.sendInput(payload)
-    return true
+    return { ok: true }
   } catch {
     // WS 写失败 → 退回后端轨,别丢这次操作。
     return sendKeys(host, tsess, body)

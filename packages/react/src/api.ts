@@ -284,13 +284,18 @@ export async function fetchSessions(host: string): Promise<SessionMeta[]> {
 export interface CtrlState {
   kind: 'offline' | 'busy' | 'select' | 'input'
   title?: string
-  options?: { num: string; label: string; cur: boolean }[]
+  // options.checked 三态(仅多选菜单有意义):true=已勾选、false=未勾选、undefined=单选菜单
+  // (行内无复选框字形)。前端据 checked 是否为 undefined 区分单选(moveTo+Enter)与多选
+  // (moveTo+Space 切换、Enter 确认)。与后端 ctrlOption.Checked(*bool,nil=单选)对齐。
+  options?: { num: string; label: string; cur: boolean; checked?: boolean }[]
   effort?: string
   actions?: { label: string; keys?: string[]; text?: string }[]
   verb?: string // busy:里世界当前工作动词(如 Zesting),后端从抓屏解析,可空
   tokens?: string // busy:本轮 token 数(如 "1.2k"),后端解析,可空
   tip?: string // busy:里世界 Tip 行,后端解析,可空
   elapsed?: string // busy:里世界真实运行时间(如 "7s"),后端抓屏解析;抓不到时前端本地兜底
+  phase?: string // busy:特殊阶段标识。目前仅 'compacting'(/compact 正在压缩上下文),据此渲染专属进度条
+  percent?: number // busy:阶段真实进度百分比(1-100),目前用于压缩进度条;里世界未给(或 0)则空 → 不确定态
   hint?: string // input:底部提示行(如 "? for shortcuts"),可空
   suggest?: string // input:里世界「输入建议」(Prompt suggestions)整条文本,后端抓屏解析;无建议则空
 }
@@ -308,20 +313,42 @@ export async function fetchState(_host: string, tsess: string): Promise<CtrlStat
   }
 }
 
+// sendKeys 返回 SendResult:把「成功 / 后端拒发(409,带真实 kind)/ 网络失败」三者区分开。
+//   ok:true            —— 已送达(普通 200)。
+//   ok:false, kind:…   —— server floor 拒发(里世界此刻非 input;kind=后端重测的真实态),
+//                          供 ControlBar 把真实原因冒给用户、并保留草稿待重试。
+//   ok:false(无 kind)—— 网络/解析失败或其它非 2xx(沿用旧的「失败」语义)。
+// clear?: 仅「原子提交」(配 enter:true)时置真:后端在打字前先 C-a C-k 清空里世界输入行,
+//   杜绝 <残留><payload> 拼接(根因 A)。JSON.stringify 已 spread ...body,clear 自动随包过去,
+//   两条路径(WS-live 与 degraded)零差异(enter:true 已强制走 /sendkeys HTTP,见 sendkeys.ts)。
+export interface SendResult {
+  ok: boolean
+  kind?: CtrlState['kind'] // 仅 409 拒发时带:后端重测的里世界真实态
+}
 export async function sendKeys(
   _host: string,
   tsess: string,
-  body: { text?: string; keys?: string[]; enter?: boolean },
-): Promise<boolean> {
+  body: { text?: string; keys?: string[]; enter?: boolean; clear?: boolean },
+): Promise<SendResult> {
   try {
     const r = await xf(xb() + '/sendkeys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session: tsess, ...body }),
     })
-    return r.ok
+    if (r.ok) return { ok: true }
+    // server floor 拒发:409 带 { ok:false, kind:<真实态> },解析出 kind 让前端冒真实原因。
+    if (r.status === 409) {
+      try {
+        const j = await r.json()
+        return { ok: false, kind: j?.kind }
+      } catch {
+        return { ok: false }
+      }
+    }
+    return { ok: false }
   } catch {
-    return false
+    return { ok: false }
   }
 }
 
@@ -411,4 +438,51 @@ export async function startSession(_host: string, tsess: string, cwd: string, cm
 // 「打开终端」:由 Provider 注入的 terminalUrl 生成(替代硬编码 ttyd /d 直链;attach cc-<id8> 并 --resume)。
 export function terminalUrl(_host: string, sid: string, cwd?: string): string {
   return getConfig().terminalUrl(sid, cwd)
+}
+
+// ── 上传:图片/文件 → 设备 POST /upload?session=<tmux名>,落盘会话 cwd 的 .ccfly-uploads/,回绝对路径 ──
+// 用 XMLHttpRequest 而非 fetch:fetch 拿不到上传(request body)进度,XHR 的 upload.onprogress 才有。
+// FormData 只塞一个字段 'file'(设备端只认它,任何 path/session_id 都被忽略,见 upload.go 安全注释)。
+// 落盘目录完全由设备从 session 解析的 cwd 决定,前端无权指定 —— 故这里只把 session 作 query 透传。
+// 成功:resolve {path,size,name}(path 是设备绝对路径,直接并进下一条提交);非 2xx:reject(带 status)。
+// 注:走与 REST 同源的 baseUrl(cloud gateway 已透传 POST body 到设备 /upload);XHR 默认带同源 cookie,
+// 沿用 cloud 的 requireAuth 会话鉴权,无需额外注入头。
+export function uploadFile(
+  file: File,
+  tsess: string,
+  onProgress?: (pct: number) => void,
+): Promise<{ path: string; size: number; name: string }> {
+  return new Promise((resolve, reject) => {
+    const fd = new FormData()
+    fd.append('file', file, file.name)
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', xb() + '/upload?session=' + encodeURIComponent(tsess))
+    xhr.withCredentials = true // 同源会话 cookie(cloud gateway requireAuth);跨源场景由消费方反代处理
+    if (onProgress && xhr.upload) {
+      xhr.upload.onprogress = (e) => {
+        // 仅当 total 可知时算百分比(lengthComputable);否则交由调用方维持不确定态(不强报 0/100)。
+        if (e.lengthComputable && e.total > 0) onProgress(Math.round((e.loaded / e.total) * 100))
+      }
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText))
+        } catch {
+          reject(new Error('upload: bad response'))
+        }
+      } else {
+        // 把设备/网关的状态码冒上去(413=文件过大、409=会话离线、401/403=未授权…),供 UI 给可操作提示。
+        reject(new Error('upload ' + xhr.status))
+      }
+    }
+    xhr.onerror = () => reject(new Error('upload network error'))
+    xhr.onabort = () => reject(new Error('upload aborted'))
+    // 整体超时兜底:设备旧二进制无 /upload handler 时,Go ServeMux 返 404 却不漏读请求体 →
+    // 浏览器上传背压、进度卡在中途(常见「卡 49%」)永不结束。超时让卡死的上传落到错误态(可重试),
+    // 而非永久转圈。45s 对常见图片/小文件足够;真要传大文件可调大。
+    xhr.timeout = 45000
+    xhr.ontimeout = () => reject(new Error('upload timeout'))
+    xhr.send(fd)
+  })
 }

@@ -73,6 +73,14 @@ function fmtTokens(n?: number): string {
   return (n / 1_000_000).toFixed(1) + 'M'
 }
 
+// ── 拉取阶段:载入中 / 就绪(有详情)/ 空(查无此 run)/ 出错。 ──
+// 关键:旧实现只有 detail(null|有)一个轴,正文「!detail → 载入工作流…」于是把
+//   ① 首拉未回、② 后端 404 返 null(run 文件尚未落盘 / runId 解析不出 / 云端代理转发失败)、
+//   ③ fetch 抛错
+// 三者全渲成「载入工作流…」并永不退出 —— 这正是卡片「永久 loading」的根因。
+// 故引入显式四态:fetch 落定(无论拿到 detail 还是 null)即翻出 loading,空/错有各自终态。
+type WfPhase = 'loading' | 'ready' | 'empty' | 'error'
+
 // ── 详情拉取钩子(WorkflowCard 与 overlay 共用):优先 runId(可钻入),否则 toolUseId 兜底反查。 ──
 // forceRunning 让无工具三态的调用方(overlay)在拿到详情前先按「运行中」轮询,直到详情给出终态。
 function useWorkflowDetail(
@@ -81,23 +89,59 @@ function useWorkflowDetail(
   runId: string,
   toolUseId: string,
   forceRunning: boolean,
-): { detail: WorkflowDetail | null; running: boolean } {
+): { detail: WorkflowDetail | null; running: boolean; phase: WfPhase } {
   const [detail, setDetail] = useState<WorkflowDetail | null>(null)
+  const [phase, setPhase] = useState<WfPhase>('loading')
   const running = detail ? !isTerminal(detail.status) : forceRunning
   useEffect(() => {
-    if (!sid || (!runId && !toolUseId)) return
+    // 入参没凑齐(无 sid 或既无 runId 又无 toolUseId)→ 没东西可拉,直接定为「空」,
+    // 否则会停在初始 loading 永不动。
+    if (!sid || (!runId && !toolUseId)) {
+      setPhase('empty')
+      return
+    }
     let alive = true
     let timer = 0
+    // 换 run / 重挂时复位回 loading(上一份详情与阶段不再代表本 run)。
+    setDetail(null)
+    setPhase('loading')
+    // 运行中容错轮询的兜底次数:run 文件还没落盘时(404→null)会连吃几次空。
+    // 给个上限,既覆盖「刚启动、文件晚到」的正常窗口,又保证最终一定退出 loading,
+    // 不至于因后端始终查不到(已被清理 / runId 解析错)而无限空转。
+    const MAX_EMPTY_POLLS = 8 // ×2s ≈ 16s
+    let emptyPolls = 0
     const pull = () => {
       const p = runId ? fetchWorkflow(host, sid, runId) : fetchWorkflowByToolUse(host, sid, toolUseId)
       p.then((d) => {
         if (!alive) return
-        if (d) setDetail(d)
-        // 仍在运行(无详情时退回 forceRunning)→ 续轮询;终态停。
-        const stillRunning = d ? !isTerminal(d.status) : forceRunning
-        if (alive && stillRunning) timer = window.setTimeout(pull, 2000)
+        if (d) {
+          // 拿到详情:就绪,清空轮空计数。
+          setDetail(d)
+          setPhase('ready')
+          emptyPolls = 0
+          // 仍在运行 → 续轮询刷新;终态停。
+          if (!isTerminal(d.status)) timer = window.setTimeout(pull, 2000)
+          return
+        }
+        // d==null:后端 404 / 拿不到。运行中(forceRunning)时再宽限几次(等文件落盘),
+        // 用尽 / 非运行中则定为「空」—— 无论如何都退出 loading。
+        emptyPolls++
+        if (forceRunning && emptyPolls < MAX_EMPTY_POLLS) {
+          setPhase('loading')
+          timer = window.setTimeout(pull, 2000)
+        } else {
+          setPhase('empty')
+        }
       }).catch(() => {
-        if (alive && forceRunning) timer = window.setTimeout(pull, 2000)
+        if (!alive) return
+        // fetch 抛错(网络 / 代理断)。运行中宽限重试;否则定为「错」,不再无限重试。
+        emptyPolls++
+        if (forceRunning && emptyPolls < MAX_EMPTY_POLLS) {
+          setPhase('loading')
+          timer = window.setTimeout(pull, 2000)
+        } else {
+          setPhase('error')
+        }
       })
     }
     pull()
@@ -106,7 +150,7 @@ function useWorkflowDetail(
       if (timer) clearTimeout(timer)
     }
   }, [host, sid, runId, toolUseId, forceRunning])
-  return { detail, running }
+  return { detail, running, phase }
 }
 
 export function WorkflowCard({ block }: { block: Block }) {
@@ -117,8 +161,8 @@ export function WorkflowCard({ block }: { block: Block }) {
   const runId = parseRunId(res?.content)
   const seedSummary = parseSummary(res?.content)
 
-  // 详情 + 运行态(工具三态 running=在飞作 forceRunning 起点)。
-  const { detail, running } = useWorkflowDetail(host, sid, runId, toolUseId, toolStatus === 'running')
+  // 详情 + 运行态(工具三态 running=在飞作 forceRunning 起点)+ 拉取阶段(loading/ready/empty/error)。
+  const { detail, running, phase } = useWorkflowDetail(host, sid, runId, toolUseId, toolStatus === 'running')
 
   const name = detail?.name || '工作流'
   const summary = detail?.summary || seedSummary
@@ -141,8 +185,16 @@ export function WorkflowCard({ block }: { block: Block }) {
     </span>
   )
 
-  // BlockShell.status:整体运行中 → running(头部脉动 spinner);终态按成功/失败上色。
-  const shellStatus = running ? 'running' : detail && (detail.status || '').toLowerCase() === 'failed' ? 'err' : 'ok'
+  // BlockShell.status:整体运行中 → running(头部脉动 spinner);拉取出错 → err;
+  // 终态按成功/失败上色。注意 phase==='error' 也算 err,避免错状态还顶着「运行中」脉动。
+  const shellStatus =
+    phase === 'error'
+      ? 'err'
+      : running
+        ? 'running'
+        : detail && (detail.status || '').toLowerCase() === 'failed'
+          ? 'err'
+          : 'ok'
   const headerExtra = statusPill(detail?.status)
 
   return (
@@ -155,24 +207,28 @@ export function WorkflowCard({ block }: { block: Block }) {
       defaultOpen={true}
       headerExtra={headerExtra}
     >
-      <WorkflowInner host={host} sid={sid} runId={runId} detail={detail} running={running} />
+      <WorkflowInner host={host} sid={sid} runId={runId} detail={detail} running={running} phase={phase} />
     </BlockShell>
   )
 }
 
 // ── 详情正文(phase 分组 + 各 agent 行 + 汇总脚):WorkflowCard 与 overlay 共用。 ──
+// phase 四态决定无详情时显示什么:loading=载入中、empty=查无此 run、error=拉取失败。
+// 旧实现只看 !detail 一律渲「载入工作流…」→ 404/出错也卡在载入,这是永久 loading 的正文侧表现。
 function WorkflowInner({
   host,
   sid,
   runId,
   detail,
   running,
+  phase,
 }: {
   host: string
   sid: string
   runId: string
   detail: WorkflowDetail | null
   running: boolean
+  phase: WfPhase
 }) {
   const phases = detail?.phases || []
   const agents = detail?.agents || []
@@ -180,7 +236,14 @@ function WorkflowInner({
   return (
     <>
       {!detail ? (
-        <div className="wfc-wait">载入工作流…</div>
+        // 无详情:按拉取阶段给出确定的终态文案,绝不停在 loading。
+        phase === 'error' ? (
+          <div className="wfc-wait wfc-wait--err">未能载入工作流</div>
+        ) : phase === 'empty' ? (
+          <div className="wfc-wait">无工作流记录</div>
+        ) : (
+          <div className="wfc-wait">载入工作流…</div>
+        )
       ) : groups.length === 0 ? (
         <div className="wfc-wait">{running ? '工作流运行中…' : '无 agent 记录'}</div>
       ) : (
@@ -373,7 +436,7 @@ export function WorkflowOverlayHost() {
 // 单层 workflow 详情弹层:.sav 模态壳 + 横幅(🧩 工作流 + 名 + 状态)+ WorkflowInner 正文。
 function WorkflowOverlay({ args, onClose }: { args: WorkflowOverlayArgs; onClose: () => void }) {
   const { host, sid, runId } = args
-  const { detail, running } = useWorkflowDetail(host, sid, runId, '', !!args.running)
+  const { detail, running, phase } = useWorkflowDetail(host, sid, runId, '', !!args.running)
   const name = detail?.name || args.name || '工作流'
   return (
     <div className="sav">
@@ -383,7 +446,10 @@ function WorkflowOverlay({ args, onClose }: { args: WorkflowOverlayArgs; onClose
           <span className="sav-tag">工作流</span>
           <span className="sav-desc">{name}</span>
           <span className="sav-spacer" />
-          {running ? (
+          {phase === 'error' ? (
+            // 拉取失败:别再顶「✓ 完成」误导,显式标错(.sav-state--err)。
+            <span className="sav-state sav-state--err">载入失败</span>
+          ) : running ? (
             <span className="sav-state sav-state--run">
               <span className="sav-dot" />
               进行中
@@ -396,7 +462,7 @@ function WorkflowOverlay({ args, onClose }: { args: WorkflowOverlayArgs; onClose
           </button>
         </div>
         <div className="sav-body">
-          <WorkflowInner host={host} sid={sid} runId={runId} detail={detail} running={running} />
+          <WorkflowInner host={host} sid={sid} runId={runId} detail={detail} running={running} phase={phase} />
         </div>
       </div>
     </div>

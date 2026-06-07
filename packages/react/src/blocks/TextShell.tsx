@@ -1,9 +1,9 @@
 // 批次1 · 文本族控件:用户气泡 / 助手正文 / 思考块 / 消息头。前缀 tx-。
-// 依赖批次0:BlockShell(折叠卡壳)、Collapsible(折叠正文)。复用 components.tsx 的 MD。
+// 依赖批次0:Collapsible(折叠正文)。复用 components.tsx 的 MD。思考块自绘(仿 TUI),不走 BlockShell 卡壳。
 // 视觉:IDE 化终端 —— 文本走 MD,等宽长块降级为 pre;思考默认折叠并 dim。
-import { type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { MD, shortModel } from '../components'
-import { BlockShell, Collapsible } from './shell'
+import { Collapsible } from './shell'
 
 // ── 消息头:角色标签 + 可选模型徽标。仅在角色/模型切换处由调用方渲染 ──
 export interface MsgHeaderProps {
@@ -118,27 +118,33 @@ function thinkBrief(text: string): string {
   return s
 }
 
-// ── 思考块:BlockShell accent=none icon=💭 defaultOpen=false。
-// 折叠条显首句约 40 字 + 字数;展开走 MD 但整块 dim 降对比 ──
+// ── 思考块(仿 TUI):不再用 BlockShell 卡壳(💭+边框+字数卡,与 TUI 不符)。
+// 改为 TUI 的「✻ 思考」布局 —— dim 星标 + dim 标题,默认折叠时尾随首句摘要;
+// 展开后正文 dim 斜体、左竖线缩进(对齐 claude TUI 思考的内联 dim 呈现)。
 export interface ThinkingBlockProps {
   text: string
 }
 export function ThinkingBlock({ text }: ThinkingBlockProps) {
+  const [open, setOpen] = useState(false)
   const body = text || ''
   if (!body.trim()) return null
-  const chars = body.replace(/\s/g, '').length
   return (
-    <BlockShell
-      icon="💭"
-      title="思考"
-      brief={thinkBrief(body)}
-      accent="none"
-      defaultOpen={false}
-      headerExtra={<span className="tx-think-cnt">{chars} 字</span>}
-    >
-      <div className="tx-think-body">
-        <MD text={body} />
+    <div className={'tx-think' + (open ? ' tx-think--open' : '')}>
+      <div className="tx-think-head" onClick={() => setOpen((o) => !o)} role="button">
+        <span className="tx-think-star" aria-hidden="true">
+          ✻
+        </span>
+        <span className="tx-think-label">思考</span>
+        {!open && <span className="tx-think-brief">{thinkBrief(body)}</span>}
+        <span className="tx-think-chev" aria-hidden="true">
+          {open ? '▾' : '▸'}
+        </span>
       </div>
-    </BlockShell>
+      {open && (
+        <div className="tx-think-body">
+          <MD text={body} />
+        </div>
+      )}
+    </div>
   )
 }

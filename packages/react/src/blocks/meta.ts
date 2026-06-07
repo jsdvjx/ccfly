@@ -22,8 +22,12 @@ export const TOOL_META: Record<string, ToolMeta> = {
   Edit: { icon: '✂️', title: 'Edit', accent: 'file', defaultOpen: false },
   MultiEdit: { icon: '✂️', title: 'MultiEdit', accent: 'file', defaultOpen: false },
   NotebookEdit: { icon: '📓', title: 'NotebookEdit', accent: 'file', defaultOpen: false },
+  NotebookRead: { icon: '📓', title: 'NotebookRead', accent: 'file', defaultOpen: false },
   // 执行/搜索(exec)·默认折叠(头部常显 + 正文截断预览)
   Bash: { icon: '❯', title: 'Bash', accent: 'exec', defaultOpen: false },
+  BashOutput: { icon: '❯', title: 'BashOutput', accent: 'exec', defaultOpen: false },
+  KillShell: { icon: '✕', title: 'KillShell', accent: 'exec', defaultOpen: false },
+  SlashCommand: { icon: '⌘', title: 'SlashCommand', accent: 'exec', defaultOpen: false },
   Grep: { icon: '🔍', title: 'Grep', accent: 'exec', defaultOpen: false },
   Glob: { icon: '🗂', title: 'Glob', accent: 'exec', defaultOpen: false },
   LS: { icon: '🗂', title: 'LS', accent: 'exec', defaultOpen: false },

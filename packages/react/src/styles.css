@@ -291,6 +291,18 @@ pre.code { background: #0c0e13; padding: 10px 12px; }
 /* 中断按钮窄屏更紧凑(中断说明已并入 title) */
 .busy-int { flex: 0 0 auto; min-height: 40px; padding: 0 14px; font-size: 14px; transition: background 0.2s, border-color 0.2s; }
 .tips { color: var(--mut); font-size: 11.5px; text-align: center; padding: 6px 10px 2px; min-height: 1.1em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: 0.85; }
+/* ── 压缩进度条(/compact):里世界给真实百分比 → 确定态;没给 → 不确定态滚动条纹 ── */
+.cmp-bar { align-items: center; gap: 10px; }
+.cmp-main { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.cmp-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.cmp-ico { flex: 0 0 auto; font-size: 14px; }
+.cmp-label { color: var(--fg); font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
+.cmp-meta { margin-left: auto; flex: 0 0 auto; color: #aecbf6; font: 12px ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+/* 轨道 + 填充:确定态用 width(平滑过渡到里世界报的百分比);不确定态走滚动条纹动画 */
+.cmp-track { position: relative; height: 7px; border-radius: 99px; background: rgba(255,255,255,0.08); overflow: hidden; }
+.cmp-fill { height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--acc), #7cc0ff); transition: width 0.45s cubic-bezier(0.4,0,0.2,1); box-shadow: 0 0 8px rgba(124,192,255,0.5); }
+.cmp-track.indet .cmp-fill { width: 38%; animation: cmp-indet 1.15s ease-in-out infinite; }
+@keyframes cmp-indet { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
 /* busy 动画:整条呼吸 / spinner 脉动 / 省略号闪烁 —— 幅度克制,只为「活着」感 */
 @keyframes busy-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.72; } }
 @keyframes busy-pulse { 0%, 100% { transform: scale(1); opacity: 0.85; } 50% { transform: scale(1.22); opacity: 1; } }
@@ -351,9 +363,290 @@ pre.code { background: #0c0e13; padding: 10px 12px; }
 .cbar.col .cbar-row .cbtn { flex: 1; }
 .cbtn.opt { text-align: left; font-weight: 600; min-height: 48px; padding: 10px 14px; white-space: normal; }
 .cbtn.opt.cur { background: #1e3a5f; border-color: var(--acc); color: #fff; }
+/* 多选已勾选项(checked):左侧绿条 + 微亮底,与单选高亮(.cur 蓝)区分;两者可叠加(当前项且已勾选)。 */
+.cbtn.opt.on { border-left: 3px solid var(--acc); background: #16321f; }
 .cbtn.adj { flex: none; min-width: 56px; font-size: 18px; }
 .cbtn.slash { flex: none; min-width: 46px; font-size: 18px; color: var(--mut); }
 .ctoast { position: fixed; left: 50%; transform: translateX(-50%); top: calc(env(safe-area-inset-top) + 60px); z-index: 70; background: #20242d; color: var(--fg); border: 1px solid var(--bd); border-radius: 20px; padding: 8px 16px; font-size: 13px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5); }
+
+/* ── 空闲 input 态:次级工具行 + 附件条 + 核心 compose 行(ComposeChips)──
+   .compose 用 .cbar.col 纵向骨架纵向收口三段:
+     ① 次级工具行 .compose-tools:一枚宽「模型 chip(模型+版本+力度)」+ 四枚 compact 图标按钮
+        (压缩/清空/命令/建议,风格统一、等高);行可换行(flex-wrap),不横滚;
+     ② 附件缩略图条(有才占位);
+     ③ 核心 compose 行 .compose-row(📎 附件 + 输入框 + 发送 同处一行 —— 同业务)。
+   设计意图(用户反馈):发送与附件同属「发消息」业务,与输入框同行;其余功能做成统一 compact 图标按钮;
+   模型 chip 同时显示模型+版本+力度,力度不单设按钮(其修改入口在模型页 /model 内)。 */
+.cbar.col.compose { gap: 8px; padding-top: 8px; }
+/* ① 次级工具行:一枚宽「模型 chip(模型+版本+力度)」+ 四枚 compact 图标按钮(压缩/清空/命令/建议)。
+   可换行(flex-wrap)、不横滚;所有 chip compact 且等高。 */
+.compose-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.compose-tools .cchip { min-height: 34px; box-sizing: border-box; }   /* 统一高度:等高不串(含边框) */
+/* compact 图标按钮(压缩/清空/命令/建议):只图标、定宽方形、居中 —— 四枚风格统一。 */
+.cchip--icon { width: 38px; padding: 0; justify-content: center; flex: 0 0 auto; }
+.cchip--icon .cchip-ico { font-size: 15px; opacity: 1; }
+.cchip--icon:disabled { opacity: 0.4; cursor: default; }
+/* 模型 chip(opus 按钮):可拉宽,文字不截断(行容器换行而非 chip 内换行,故高度仍一致);力度部分按 tone 上色。 */
+.cchip--model { flex: 0 1 auto; min-width: 0; }
+.cchip--model .cchip-txt { max-width: none; }
+.cchip-eff { font-weight: 700; opacity: 0.95; }
+.cchip-eff.eff-min  { color: #9aa3b2; }
+.cchip-eff.eff-low  { color: #6fd49a; }
+.cchip-eff.eff-med  { color: #7cc0ff; }
+.cchip-eff.eff-high { color: #ffcf6b; }
+.cchip-eff.eff-max  { color: #ff9bb0; }
+/* 建议 chip:accent 微调,提示「可采用」。 */
+.cchip--sug { color: var(--acc); border-color: rgba(79, 156, 249, 0.4); }
+/* ③ 核心 compose 行:📎 + 输入框(flex:1)+ 发送 横排底对齐;覆写 .cbar.col 对 .cbtn 的整宽拉伸。 */
+.compose-row { display: flex; align-items: flex-end; gap: 8px; min-width: 0; }
+.cbar.col.compose .compose-row .cbtn { width: auto; flex: none; }     /* 撤销 .cbar.col .cbtn{width:100%} */
+.cbar.col.compose .compose-row .send-btn { min-width: 88px; }          /* 发送给足触控宽度 */
+/* chip 行:横向单行,窄屏可横滚(不竖堆、不撑破);隐藏滚动条减少视觉噪声。 */
+.cchips {
+  display: flex; align-items: center; gap: 6px; min-width: 0;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  padding-bottom: 1px; /* 给焦点描边留 1px,免被裁切 */
+}
+.cchips::-webkit-scrollbar { display: none; }
+/* 单个 chip:小号药丸按钮(比 .cbtn 更克制),不缩、不换行;图标 + 文字两段。 */
+.cchip {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+  min-height: 30px; padding: 0 10px; border-radius: 999px;
+  font: 600 12.5px system-ui; color: var(--mut);
+  background: var(--bg2); border: 1px solid var(--bd); cursor: pointer;
+  white-space: nowrap; user-select: none; -webkit-user-select: none;
+  transition: background .14s, border-color .14s, color .14s;
+}
+.cchip:active { background: #3a4150; }
+.cchip-ico { font-size: 13px; line-height: 1; opacity: 0.9; }
+.cchip-txt { line-height: 1; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+/* 模型 chip:accent 蓝色调,呼应里世界模型菜单的主色。 */
+.cchip--model { color: #aecbf6; border-color: rgba(79, 156, 249, 0.4); }
+.cchip--model:active { background: rgba(79, 156, 249, 0.14); }
+/* 力度 chip:默认中性;带 eff-* tone 时按档上色(与 .eff-chip 调色板同源)。 */
+.cchip--effort.eff-min  { color: #9aa3b2; border-color: #353b46; }
+.cchip--effort.eff-low  { color: #6fd49a; border-color: rgba(61, 220, 132, 0.4); }
+.cchip--effort.eff-med  { color: #7cc0ff; border-color: rgba(79, 156, 249, 0.42); }
+.cchip--effort.eff-high { color: #ffcf6b; border-color: rgba(255, 207, 107, 0.46); }
+.cchip--effort.eff-max  { color: #ff9bb0; border-color: rgba(255, 138, 138, 0.5); }
+/* 破坏性 chip(清空):红色调描边,提示「会清掉东西」。 */
+.cchip--danger { color: var(--red); border-color: #5a3a3a; }
+.cchip--danger:active { background: #2a2027; }
+
+/* ── 附件:图片/文件上传(AttachmentBar)── */
+/* 拖拽态:整 compose 区高亮(虚线 accent 边框 + 浅底),提示「松手即添加附件」。 */
+.cbar.col.compose.drag-active {
+  outline: 2px dashed var(--acc); outline-offset: -2px;
+  background: rgba(79, 156, 249, 0.06); border-radius: 12px;
+}
+/* 📎 按钮:默认与其它定宽键同款克制态;.is-hot(拖拽中 / 里世界要图)时微亮 + 脉动轻推。 */
+.cbtn.attach-btn { font-size: 16px; line-height: 1; transition: background .14s, border-color .14s, box-shadow .2s; }
+.cbtn.attach-btn.is-hot {
+  border-color: var(--acc); color: var(--acc);
+  background: rgba(79, 156, 249, 0.12);
+  animation: attach-pulse 1.6s ease-in-out infinite;
+}
+@keyframes attach-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 156, 249, 0); }
+  50% { box-shadow: 0 0 0 4px rgba(79, 156, 249, 0.18); }
+}
+/* 附件条:贴 chip 行下、输入行上;横向单行窄屏可滚、宽屏 wrap;移动端无横向溢出。 */
+.attach-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  padding: 2px 0;
+}
+.attach-bar::-webkit-scrollbar { display: none; }
+/* 单个附件 chip:固定 40x40 缩略图;相对定位托住进度/错误/移除三个角标。 */
+.attach-chip {
+  position: relative; flex: 0 0 auto;
+  width: 40px; height: 40px; border-radius: 8px;
+  border: 1px solid var(--bd); background: var(--bg2); overflow: hidden;
+  cursor: default;
+}
+.attach-chip.is-error { border-color: var(--red); cursor: pointer; } /* error 整 chip 可点重试 */
+.attach-chip.is-uploading .attach-thumb { opacity: 0.45; }            /* 上传中缩略图压暗,衬进度数字 */
+/* 缩略图:图片铺满 cover;非图片用字形格(扩展名 + 大小两行)。 */
+.attach-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.attach-glyph {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+  background: #1b1f27; color: var(--mut);
+}
+.attach-ext { font: 700 10px system-ui; letter-spacing: 0.02em; line-height: 1; }
+.attach-sz { font: 9px ui-monospace, Menlo, monospace; color: var(--mut); line-height: 1; opacity: 0.8; }
+/* 上传进度覆盖:半透明黑底 + 居中百分比(覆盖整 chip)。 */
+.attach-progress {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(15, 17, 21, 0.55);
+}
+.attach-pct { font: 700 11px system-ui; color: var(--fg); }
+/* 错误角标:红底 ↻(整 chip 也可点);居中提示「点击重试」。 */
+.attach-err {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 138, 138, 0.18); color: var(--red); font-size: 16px;
+}
+/* 移除(✕):右上角小圆点,深底白叉;高 z 压在缩略图/角标之上。 */
+.attach-remove {
+  position: absolute; top: 1px; right: 1px; z-index: 2;
+  width: 16px; height: 16px; padding: 0; border: none; border-radius: 999px;
+  background: rgba(15, 17, 21, 0.82); color: var(--fg);
+  font: 11px/1 system-ui; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.attach-remove:active { background: var(--red); color: #0f1115; }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   富 select 组件(select/*.tsx)· 客户端分类后替换通用 select 分支的卡片化 UI。
+   七组前缀(.rms- 模型 / .rps- 权限 / .res- 力度 / .rcs- 确认 / .rss- 作用域 / .rmsel- 多选 / .rls- 长清单),
+   一律 extends 而非 redefine .cbtn/.cbar/.pill/.eff-*;全部 className 基,移动端无横向溢出。
+   ══════════════════════════════════════════════════════════════════════════════ */
+
+/* ── 富模型选择器 RichModelSelect:卡片化的「/model 切换模型」菜单 ──
+   作用域钩子 .rms 套在 .cbar.col 之上(复用纵向布局/标题/按钮骨架);
+   .rms-opt 扩展 .cbtn.opt(卡片行,纵向两段:徽章+标签行 / 能力提示行)。 */
+.rms { gap: 6px; }
+/* 模型卡片行:在 .cbtn.opt 基础上改为纵向两段布局,容下「徽章行 + 能力提示行」。 */
+.rms-opt { display: flex; flex-direction: column; align-items: stretch; gap: 4px; min-height: 56px; }
+/* 当前模型(里世界菜单光标所在项):沿用 .cbtn.opt.cur 蓝高亮,补一道左 accent 竖条强化「当前」。 */
+.rms-opt.cur { border-left: 3px solid var(--acc); }
+/* 第一段:家族徽章 + 模型标签 + 「当前」尾标,单行可换行(窄屏自然折行,不撑破)。 */
+.rms-opt-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+/* 模型标签:占满剩余宽,长名可任意断行(防横向溢出)。 */
+.rms-opt-label { flex: 1 1 auto; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+/* 家族徽章药丸:复用 .pill 骨架(尺寸/圆角),按档位覆写色味。 */
+.rms-badge { flex: 0 0 auto; letter-spacing: 0.2px; }
+.rms-badge--opus { background: rgba(255, 207, 107, 0.16); color: var(--amber); border-color: rgba(255, 207, 107, 0.4); }
+.rms-badge--sonnet { background: rgba(79, 156, 249, 0.14); color: #aecbf6; border-color: rgba(79, 156, 249, 0.42); }
+.rms-badge--haiku { background: rgba(61, 220, 132, 0.14); color: #6fd49a; border-color: rgba(61, 220, 132, 0.4); }
+/* 「当前」尾标:贴在标签行末,弱化的小药丸,与 .rms-opt.cur 高亮呼应。 */
+.rms-cur-tag { flex: 0 0 auto; font: 700 10px ui-monospace, Menlo, monospace; letter-spacing: 0.3px; color: #cfe0fb; background: rgba(79, 156, 249, 0.16); border: 1px solid rgba(79, 156, 249, 0.4); border-radius: 8px; padding: 1px 7px; line-height: 1.5; }
+/* 第二段:能力提示(上下文窗口 · 思考支持),mut 弱色小字;长串可断行。 */
+.rms-meta { color: var(--mut); font-size: 11.5px; line-height: 1.45; overflow-wrap: anywhere; font-weight: 400; }
+
+/* ── RichPermissionSelect:权限/信任富卡 ── */
+.rps-head { display: flex; align-items: center; gap: 8px; }
+.rps-ico { flex: none; font-size: 15px; line-height: 1; }
+.rps-title { min-width: 0; overflow-wrap: anywhere; }
+/* 被请求目标:等宽行,弱卡底,绝不横向溢出。 */
+.rps-target { font: 12px/1.5 ui-monospace, Menlo, monospace; color: var(--fg); background: #0c0e13; border: 1px solid var(--bd); border-radius: 8px; padding: 7px 10px; overflow-wrap: anywhere; word-break: break-word; }
+/* 选项:在 .cbtn.opt 之上加左色条 + 字色,意图一望即知。 */
+.rps-opt { position: relative; }
+.rps-opt--allow { border-left: 3px solid var(--green); }
+.rps-opt--allow:not(.cur) { color: var(--green); }
+.rps-opt--deny { border-left: 3px solid var(--red); }
+.rps-opt--deny:not(.cur) { color: var(--red); }
+.rps-opt--soft { border-left: 3px solid var(--amber); }
+.rps-opt--soft:not(.cur) { color: var(--amber); }
+/* 「记住/不再询问」角标:柔和 amber 小药丸。 */
+.rps-dontask { display: inline-flex; align-items: center; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font: 600 10px system-ui; background: rgba(255, 207, 107, 0.16); color: var(--amber); border: 1px solid rgba(255, 207, 107, 0.35); vertical-align: middle; white-space: nowrap; }
+
+/* ── RichEffortSelect:力度滑轨富组件 ──
+   复用 .cbtn/.cbtn.adj(微调键);.res-seg.eff-* 自带调色板(与 .eff-chip 同源,本地化避免耦合)。 */
+.res { display: flex; flex-direction: column; gap: 10px; width: 100%; min-width: 0; }
+.res-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.res-title { font-size: 13px; color: var(--mut); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.res-cur { flex: none; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--bd); background: var(--bg2); }
+/* 当前档徽标 tone 上色(.res-cur 直接挂 eff-min/low/med/high/max;此处提供独立色规则)。 */
+.res-cur.eff-min  { color: #9aa3b2; }
+.res-cur.eff-low  { color: #6fd49a; }
+.res-cur.eff-med  { color: #7cc0ff; }
+.res-cur.eff-high { color: #ffcf6b; }
+.res-cur.eff-max  { color: #ff9bb0; }
+/* 微调 + 轨道一行:◀ [刻度轨] ▶。 */
+.res-bar { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+.res-adj { flex: none; align-self: center; }
+.cbtn.adj.res-adj:disabled { opacity: 0.4; cursor: default; }
+.cbtn.adj.res-adj:disabled:active { background: var(--card); }
+/* 刻度轨:等分各档,允许换行(窄屏不溢出)。 */
+.res-track { flex: 1 1 auto; min-width: 0; display: flex; gap: 6px; align-items: stretch; flex-wrap: wrap; }
+/* 每一档 = 可点 segment:点 + 标签竖排,默认中性灰。 */
+.res-seg { flex: 1 1 0; min-width: 56px; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 8px 4px; border: 1px solid var(--bd); border-radius: 10px; background: var(--bg2); color: var(--mut); font: inherit; cursor: pointer; transition: border-color .12s, background .12s, color .12s; }
+.res-seg:active { background: #3a4150; }
+.res-dot { width: 10px; height: 10px; border-radius: 50%; background: #353b46; border: 1px solid var(--bd); transition: background .12s, box-shadow .12s, border-color .12s; }
+.res-label { font-size: 11px; font-weight: 600; line-height: 1; }
+/* 已达到(含当前)的档:点位填上对应 tone 色,营造「填充到此」的滑轨观感。 */
+.res-seg.reached .res-dot { background: currentColor; border-color: currentColor; }
+/* 当前档:整段高亮(描边 + 微底 + 加亮文字 + 点位发光)。 */
+.res-seg.on { border-color: currentColor; background: color-mix(in srgb, currentColor 14%, var(--bg2)); }
+.res-seg.on .res-dot { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 30%, transparent); }
+.res-seg.on .res-label { color: #fff; }
+/* tone 调色(currentColor 即该档颜色;与 .eff-chip 调色板同源)。 */
+.res-seg.eff-min  { color: #9aa3b2; }
+.res-seg.eff-low  { color: #6fd49a; }
+.res-seg.eff-med  { color: #7cc0ff; }
+.res-seg.eff-high { color: #ffcf6b; }
+.res-seg.eff-max  { color: #ff9bb0; }
+/* 动作行:确认 / 取消。 */
+.res-actions { display: flex; gap: 8px; }
+.res-actions .cbtn { flex: 1; }
+
+/* ── RichConfirmSelect:富确认卡(扩展 .cbar.col;复用 .cbtn/.primary/.danger 与色彩变量)── */
+.rcs { gap: 12px; border-radius: 0; }
+.rcs--danger { border-top: 1px solid rgba(255, 138, 138, 0.5); background: linear-gradient(rgba(255, 138, 138, 0.06), rgba(15, 17, 21, 0.96)); }
+/* 居中提问:字形在上、标题在下,整体居中,长标题自动换行不溢出。 */
+.rcs-q { display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; padding: 4px 4px 0; }
+.rcs-icon { font-size: 26px; line-height: 1; }
+.rcs--danger .rcs-icon { filter: drop-shadow(0 0 6px rgba(255, 138, 138, 0.45)); }
+.rcs-qt { font: 600 15px/1.5 system-ui; color: var(--fg); max-width: 100%; overflow-wrap: anywhere; }
+.rcs--danger .rcs-qt { color: #ffc4c4; }
+/* 按钮行:默认横排平分,窄屏(<360px)竖排成全宽大按钮——绝不横向溢出。 */
+.rcs-btns { gap: 10px; flex-wrap: wrap; }
+.rcs-btns .cbtn { flex: 1 1 0; min-width: 120px; min-height: 50px; font: 700 15px system-ui; justify-content: center; display: inline-flex; align-items: center; gap: 6px; white-space: normal; overflow-wrap: anywhere; text-align: center; }
+/* 肯定键:普通走 .primary;破坏性时叠加 .danger 之上再强化为「实心红」(危险动作要醒目)。 */
+.rcs--danger .rcs-yes.danger { background: var(--red); border-color: var(--red); color: #2a0a0a; font-weight: 800; }
+.rcs--danger .rcs-yes.danger:active { background: #ff6f6f; }
+/* 审阅键:中性第三态(灰底,既不肯定也不否定)。 */
+.rcs-review { color: var(--fg); }
+/* 否定键:沿用 .cbtn.danger 描边红;实底由肯定键独占,避免两红争焦。 */
+.rcs-no { font-weight: 700; }
+@media (max-width: 360px) { .rcs-btns .cbtn { flex-basis: 100%; } }
+
+/* ── RichSessionScopeSelect:作用域(全局 vs 本次)富 select。复用 .cbar/.cbtn;flex 换行无溢出。 ── */
+.rss { gap: 10px; }
+/* 两张作用域卡:flex 等分,窄屏自动换行(flex-wrap)。继承 .cbar-row 的 gap。 */
+.rss-cards { flex-wrap: wrap; }
+/* 单卡:在 .cbtn 基座上改为「图标+标签+副标题」纵向布局;等分占位、有最小宽度以便窄屏换行。 */
+.rss-card { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1 1 140px; min-width: 0; gap: 4px; min-height: 96px; padding: 14px 12px; text-align: center; white-space: normal; }
+.rss-icon { font-size: 30px; line-height: 1; }
+.rss-card .rss-label { font: 700 15px system-ui; color: inherit; }
+.rss-card .rss-sub { font-size: 11px; color: var(--mut); overflow-wrap: anywhere; }
+/* primary 卡(全局保存)用 accent 底:其副标题在亮底上需深色以保可读。 */
+.rss-card.primary .rss-sub { color: rgba(6, 18, 31, 0.7); }
+.rss-card:active { background: #3a4150; }
+.rss-card.primary:active { background: var(--acc); filter: brightness(0.92); }
+/* 键盘提示行:灰态、居中、小字。 */
+.rss-hint { font-size: 11px; color: var(--mut); text-align: center; overflow-wrap: anywhere; }
+/* 取消按钮:整行宽(.cbar.col 下 .cbtn 已 width:100%,此处仅占位 className 供定制)。 */
+.rss-cancel { width: 100%; }
+
+/* ── RichMultiSelect:多选菜单加强版 —— 容器仅作命名锚点(布局沿用 .cbar.col)。 ── */
+.rmsel {}
+/* 加强选项行:复选框 + 标签横排,文本可换行(长标签不撑破容器,移动安全)。 */
+.rmsel-opt { display: flex; align-items: flex-start; gap: 10px; }
+/* 放大的 ☑/☐ 字形:固定不缩,顶对齐首行;已勾选项配绿(与 .opt.on 绿条同族)。 */
+.rmsel-box { flex: none; font-size: 20px; line-height: 1.2; color: var(--mut); }
+.rmsel-opt.on .rmsel-box { color: var(--green); }
+/* 标签:占满余宽并允许换行,长 token/路径不横向溢出。 */
+.rmsel-lbl { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+/* 底栏:计数靠左、按钮靠右;按钮仍按 .cbar.col .cbar-row .cbtn 平分剩余宽。 */
+.rmsel-foot { align-items: center; }
+/* 实时计数:弱化的 mut 文字,占左侧、不抢按钮宽(flex:none 防被 .cbtn 的 flex:1 挤没)。 */
+.rmsel-count { flex: none; font: 600 13px system-ui; color: var(--mut); white-space: nowrap; }
+
+/* ── RichListSelect:长单选清单(≥4 项)富卡 —— 计数徽标 + 限高滚动 + 当前项 ❯ 指示。
+   扩展 .cbar.col / .cbtn.opt;限高滚动盒防撑爆控件层,移动端无横向溢出。 ── */
+/* 头部:标题 + 计数徽标(标题占余宽并省略,徽标固定不缩)。 */
+.rls-head { display: flex; align-items: center; gap: 8px; }
+.rls-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rls-cnt { flex: 0 0 auto; }
+/* 限高滚动清单:超 ~7 项即纵向滚动(不撑爆底部控件层),内部按钮仍 100% 宽。 */
+.rls-scroll { display: flex; flex-direction: column; gap: 6px; max-height: 46vh; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 2px; margin: -2px; }
+/* 清单项:❯ 指示列 + 编号 + 标签横排;标签占余宽并允许换行,长 token/路径不横向溢出。 */
+.rls-opt { display: flex; align-items: flex-start; gap: 8px; min-height: 44px; }
+.rls-mark { flex: 0 0 auto; width: 1em; text-align: center; color: var(--acc); font-weight: 700; white-space: pre; }
+.rls-num { flex: 0 0 auto; color: var(--mut); font: 600 12px ui-monospace, Menlo, monospace; }
+.rls-label { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* 「确认」按钮上的当前项编号提示:弱化小字,提示提交的是哪一项。 */
+.rls-pick { color: #06121f; opacity: 0.7; font-weight: 600; }
 
 /* ── 斜杠命令面板(底部抽屉)── */
 .sheet { position: fixed; inset: 0; z-index: 40; display: flex; align-items: flex-end; justify-content: center; background: rgba(0, 0, 0, 0.5); }
@@ -451,6 +744,7 @@ pre.code { background: #0c0e13; padding: 10px 12px; }
 .sav-state { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; font: 600 12px system-ui; }
 .sav-state--run { color: var(--acc); }
 .sav-state--ok { color: var(--green); }
+.sav-state--err { color: var(--red); }
 .sav-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--acc); animation: savpulse 1.1s ease-in-out infinite; }
 @keyframes savpulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.35; transform: scale(0.7); } }
 .sav-close { flex: 0 0 auto; min-height: 30px; min-width: 30px; padding: 0 8px; font-size: 15px; color: var(--mut); background: #272c36; border: 1px solid var(--bd); border-radius: 8px; cursor: pointer; }

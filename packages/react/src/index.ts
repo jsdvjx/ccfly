@@ -33,6 +33,25 @@ export type { CCFlyConfig } from './config'
 
 // ── 控件层组件(可单独组合)──
 export { ControlBar } from './ControlBar'
+// 空闲 input 态的快捷 chip 行(模型/力度/压缩/清空);ControlBar 已内嵌,单独导出供自组控件层复用。
+export { ComposeChips } from './ComposeChips'
+export type { ComposeChipsProps } from './ComposeChips'
+// 图片/文件附件条 + 其状态 hook + 预判扫描器;ControlBar 已内嵌,单独导出供自组控件层复用。
+// (uploadFile 经下方 `export * from './api'` 已对外暴露,无需在此重复。)
+export { AttachmentBar, useAttachments, scanWantsImage } from './AttachmentBar'
+export type { Attachment, AttachmentsHandle } from './AttachmentBar'
+
+// ── 富 select 组件(客户端分类后替换通用 select 分支)+ 分类器/统一 props 契约 ──
+// 高级消费方可单独复用/组合;selectKind 是分类入口,RichSelectProps/RichSelectHelpers 为统一契约。
+export { selectKind } from './select/selectKind'
+export type { RichSelectProps, RichSelectHelpers, SelectKind } from './select/selectKind'
+export { RichModelSelect, isModelSelect } from './select/RichModelSelect'
+export { RichPermissionSelect, isPermissionSelect } from './select/RichPermissionSelect'
+export { RichEffortSelect, isEffortSelect } from './select/RichEffortSelect'
+export { RichConfirmSelect } from './select/RichConfirmSelect'
+export { RichSessionScopeSelect, isSessionScope } from './select/RichSessionScopeSelect'
+export { RichMultiSelect, isMultiSelect } from './select/RichMultiSelect'
+export { RichListSelect, isListSelect } from './select/RichListSelect'
 export { AgentDock } from './AgentDock'
 export { LiveTerm } from './LiveTerm'
 export { SlashPalette } from './Palette'
@@ -63,7 +82,7 @@ export {
   MultiEditCard,
   NotebookEditCard,
 } from './blocks/FileTools'
-export { BashCard, BashOutput } from './blocks/ExecTools'
+export { BashCard, BashOutput, KillShell } from './blocks/ExecTools'
 export { GrepCard, GlobCard, LsCard } from './blocks/SearchTools'
 export {
   TodoCard,
@@ -75,6 +94,9 @@ export {
   GenericCard,
 } from './blocks/MetaTools'
 export { WebFetchCard, WebSearchCard } from './blocks/WebTools'
+export { SlashCommandCard, NotebookReadCard } from './blocks/MiscTools'
+export { StructuredResultCard, tryStructuredResult } from './blocks/StructuredResultCard'
+export type { StructuredResultCardProps } from './blocks/StructuredResultCard'
 export { WorkflowCard, WorkflowOverlayHost, openWorkflow } from './blocks/WorkflowCard'
 export type { WorkflowOverlayArgs } from './blocks/WorkflowCard'
 
@@ -116,11 +138,12 @@ export {
   useLiveStore,
   useLiveState,
   useLiveDegraded,
+  useLiveCertainInput,
   detectState,
 } from './livestate'
 export type { DetectResult } from './livestate'
 export { sendAct } from './sendkeys'
-export type { SendBody } from './sendkeys'
+export type { SendBody, SendResult } from './sendkeys'
 export { liveTermHandle } from './liveconn'
 export type { LiveTermHandle } from './liveconn'
 

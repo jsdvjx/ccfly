@@ -103,7 +103,8 @@ export function useCapture(host: string, sid: string, card: CmdCard, tabs: boole
         let since: number
         try { since = (await fetchTranscript(host, sid)).cursor } catch { since = 0 }
         // 2) 提交命令(/context 打印进流,无挡路面板 → 不发 Esc)。
-        const ok = await sendKeys(host, tsess, { text: cmd, enter: true })
+        // sendKeys 现返回 SendResult({ok, kind?});这里只关心成功与否,取 .ok。
+        const { ok } = await sendKeys(host, tsess, { text: cmd, enter: true })
         if (!ok) { settleFail('offline'); return true }
         // 3) 轮询 /cmdresult 直到 found(~6 次 × 600ms);since 随后端返回的 cursor 推进,不重扫。
         for (let i = 0; i < 6; i++) {
@@ -133,7 +134,7 @@ export function useCapture(host: string, sid: string, card: CmdCard, tabs: boole
           await sleep(150)
         }
         if (esc > 0) await sleep(150)
-        const ok = await sendKeys(host, tsess, { text: cmd, enter: true })
+        const { ok } = await sendKeys(host, tsess, { text: cmd, enter: true })
         if (!ok) return settleFail('offline')
         if (rights > 0) {
           await sleep(1300) // 无直达命令(stats):落地后定向 N×Right,单次不累积
@@ -226,7 +227,7 @@ export function useSweep(host: string, sid: string, tabs: CmdCard[]): SweepState
         return
       }
       // 1) 开 /cost 面板(用量/状态/配置/统计/设置同属这一个 ← → 面板)。
-      const ok = await sendKeys(host, tsess, { text: '/cost', enter: true })
+      const { ok } = await sendKeys(host, tsess, { text: '/cost', enter: true })
       if (!ok) {
         if (alive.current) setPhase('offline')
         return

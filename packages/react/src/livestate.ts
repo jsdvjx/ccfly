@@ -13,7 +13,16 @@ import type { Terminal, IBufferLine } from '@xterm/xterm'
 import type { CtrlState } from './api'
 
 // ── 正则:与 ctrlstate.go 逐条对齐 ──
-const reOpt = /^\s*(❯|›|>)?\s*(\d+)[.)]\s+(\S.*?)\s*$/
+// reOpt — 编号选项行,「编号 + 标签」之间插入可选复选框分组(g3),用于识别多选菜单(checkbox 风格,
+// Space 切换、Enter 确认);因复选框可选,单选菜单(无复选框)照旧命中。
+//   g1=当前项游标(❯/›/>) g2=编号 g3=复选框字形(可空) g4=标签
+// 复选框字形:已勾选 ◉●☑■◼ 或 [x]/[X]/[✔];未勾选 ◯○□◻ 或 [ ]/[]。与 ctrlstate.go 逐条对齐。
+const reOpt = /^\s*(❯|›|>)?\s*(\d+)[.)]\s+([◯◉○●☑■□◻◼]|\[[ xX✔]?\])?\s*(\S.*?)\s*$/
+// reCheckOn / reCheckOff — 把复选框字形判成 勾选 / 未勾选;两者皆不命中(g3 空)= 单选项。
+const reCheckOn = /^(?:[◉●☑■◼]|\[[xX✔]\])$/
+const reCheckOff = /^(?:[◯○□◻]|\[\s?\])$/
+// 多选确认底栏:claude 多选菜单底部含「Space to select / to toggle」一类提示。与 ctrlstate.go 对齐。
+const reSpaceSel = /\bspace\b.*\bto\b.*\b(select|toggle)\b/i
 const reEffort = /^\s*\S\s+(.+?effort.*?)\s*←\/→\s*to adjust\s*$/i
 const reFooter = /(\b(esc|enter)\b.*\bto\b|←\/→\s*to adjust)/i
 const reBusy = /esc to interrupt/i
@@ -21,6 +30,10 @@ const reBusy = /esc to interrupt/i
 const reVerb = /^\s*\S\s+([A-Z][a-zA-Z]+)…/
 const reTokens = /([\d.]+[kKmM]?)\s*tokens/
 const reTip = /\bTip:\s*(.+?)\s*$/i
+// 压缩阶段(/compact):spinner 行 "✻ Compacting conversation…" + 下一行真实进度条 "▓▓░… N%"。
+// reVerb 抓不到 Compacting(其后非紧贴 …),故单独识别并解析百分比。与 ctrlstate.go 逐条对齐。
+const reCompacting = /\bCompacting\b/i
+const rePercent = /(\d{1,3})\s*%/
 const reElapsed = /\b(\d+)s\b/
 const reTitle = /^(select|choose|pick|do you|would you|permission|claude needs)/i
 const reEnterTo = /Enter\s+to\s/i
@@ -256,6 +269,30 @@ export function detectState(term: Terminal): DetectResult {
         if (m) st.elapsed = m[1] + 's'
       }
     }
+    // 压缩阶段识别 + 进度百分比解析(与 ctrlstate.go 逐条对齐)。
+    // 阶段:可见屏任一行命中 "Compacting" → phase=compacting,verb 兜底为 "Compacting"。
+    // 百分比:不再受 spinner 行位置/窄窗约束 —— 进度条("▓▓░… N%")可能离 spinner 行任意远
+    // (中间夹着上一条 prompt 的 dim 鬼影、背景色进度条格被 translateToString(true) 渲成空格、底部 "esc to interrupt"),
+    // 故扫【整屏】抓 (\d{1,3})% 并取【最后一个】落在 0..100 的匹配 —— 鬼影里的陈旧数字在上、
+    // 当前真实进度数字在进度条行(更靠下),取最后一个即取到权威值。抓不到则 percent 留空 → 前端不确定态,绝不臆造。
+    let compacting = false
+    for (const ln of lines) {
+      if (reCompacting.test(ln)) {
+        compacting = true
+        break
+      }
+    }
+    if (compacting) {
+      st.phase = 'compacting'
+      if (!st.verb) st.verb = 'Compacting'
+      for (const ln of lines) {
+        const m = rePercent.exec(ln)
+        if (m) {
+          const p = parseInt(m[1], 10)
+          if (p >= 0 && p <= 100) st.percent = p // 不 break:取整屏最后一个 plausible 匹配
+        }
+      }
+    }
     return { state: st, certain: true }
   }
 
@@ -279,13 +316,24 @@ export function detectState(term: Terminal): DetectResult {
       }
     }
     // 编号选项:自底向上,≥2、从 1 起、含 ❯ 当前项。
-    let opts: { num: string; label: string; cur: boolean }[] = []
+    // g3=复选框字形(多选独有,可空):勾选→checked=true、未勾选→false、无字形→undefined(单选)。
+    let opts: { num: string; label: string; cur: boolean; checked?: boolean }[] = []
     let started = false
     let firstIdx = -1
     for (let i = n - 1; i >= 0; i--) {
       const m = reOpt.exec(lines[i])
       if (m) {
-        opts.unshift({ num: m[2], label: m[3].replace(reWS, ' '), cur: !!m[1] })
+        const o: { num: string; label: string; cur: boolean; checked?: boolean } = {
+          num: m[2],
+          label: m[4].replace(reWS, ' '),
+          cur: !!m[1],
+        }
+        const box = m[3]
+        if (box) {
+          if (reCheckOn.test(box)) o.checked = true
+          else if (reCheckOff.test(box)) o.checked = false
+        }
+        opts.unshift(o)
         started = true
         firstIdx = i
       } else if (started) {
@@ -298,7 +346,11 @@ export function detectState(term: Terminal): DetectResult {
 
     if (opts.length > 0 || effort !== '') {
       const joinTail = tail(lines, 6).join(' ')
+      // 多选判定:任一选项带复选框字形(checked!=undefined),或底栏含「Space to select/toggle」。
+      const multi = opts.some((o) => o.checked !== undefined) || reSpaceSel.test(joinTail)
       const actions: { label: string; keys?: string[]; text?: string }[] = []
+      // 多选:先给「切换(Space)」动作 —— 移动光标到目标项后按 Space 勾/取消勾选。
+      if (multi) actions.push({ label: '切换', keys: ['Space'] })
       if (reEnterTo.test(joinTail)) actions.push({ label: '确认', keys: ['Enter'] })
       if (reSessOnly.test(joinTail)) actions.push({ label: '本次', text: 's' })
       actions.push({ label: '取消', keys: ['Escape'] })
@@ -344,11 +396,23 @@ export function detectState(term: Terminal): DetectResult {
 // ── zustand store ──
 interface LiveState {
   state: CtrlState
+  // certainInput:把 detectState 已算出却被丢弃的 certain 信号「提级」为发送前置条件。
+  // 仅当 applyDetect 确凿提交了一个 {kind:'input'}(certain 的空闲框)时为 true;提交 busy/select/offline、
+  // 或保留 last-known(certain:false 的 reflow/重连/「/context 冻结」held 帧)时为 false。
+  // ControlBar 的 submit funnel 用它做 WS-live 路径的发送闸:非 certain-input 拒发(保留草稿),
+  // 杜绝「错时机/错上下文」误发(根因 B 的客户端快速闸;权威兜底仍是后端 server floor)。
+  certainInput: boolean
   // 降级:WS 未连上 / 未握手 / 还没收到任何输出 → true(此时 P3 应回退到后端 /state 轮询)。
   degraded: boolean
   // settle 窗口截止时刻(epoch ms)。> now 时,所有解析视为 provisional:即便 certain 也只「升级」
   // 不「降级」(保留 last-known),用于扛尺寸跳动 / reflow 的瞬态。0 = 无 settle 窗口。
   settleUntil: number
+  // 最近一次确凿提交「非 input」(busy/select/offline)的时刻(epoch ms)。0 = 从未。
+  // 用于 applyDetect 的迟滞(hysteresis)闸:刚落定一个 select/busy 后的极短窗口内(HYST_MS),
+  // 单帧 certain 的 input 极可能是 TUI 重绘中途的半成品(/model 等菜单在重排那 ~100ms 会一闪 input)——
+  // 据此把它判作瞬态、拒绝降级,保留 last-known。这是 /model-menu-stuck 在「无 409、纯 WS 抖动」
+  // 路径下的兜底:server floor 重对齐(ControlBar)修「拒发后」,迟滞闸修「刚进菜单时的自发抖动」。
+  lastNonInputTime: number
   // 直接覆盖(老接口,保留;但已不在热路径用)。
   setState: (s: CtrlState) => void
   // 解析入口:按「确凿与否 + settle 窗口」决定覆盖还是保留 last-known。
@@ -366,24 +430,61 @@ function sameState(a: CtrlState, b: CtrlState): boolean {
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
+// 迟滞窗口:刚确凿落定一个非 input(select/busy)后的这段时间内,拒绝单帧 certain 的 input 降级。
+// 300ms 够覆盖 claude TUI 进/出菜单时那一两帧重绘半成品,又短到不会卡住「真的回到了输入框」——
+// 用户真正退出菜单后的输入框会持续在屏,下一帧(>300ms 后)就放行。settle 窗口(800ms)管 reflow,
+// 这条管「菜单内自发抖动」,二者正交叠加(都只挡 input 降级,绝不挡 busy/select 升级)。
+const HYST_MS = 300
+
 export const useLiveStore = create<LiveState>((set, get) => ({
   state: { kind: 'input' },
+  certainInput: false,
   degraded: true,
   settleUntil: 0,
+  lastNonInputTime: 0,
   setState: (s) => set({ state: s }),
   applyDetect: (r) => {
-    const { state: prev, settleUntil } = get()
-    const provisional = Date.now() < settleUntil
+    const { state: prev, settleUntil, lastNonInputTime } = get()
+    const now = Date.now()
+    const provisional = now < settleUntil
     // 决策:何时用新解析覆盖 last-known?
     //   1) 不确凿(certain:false)—— 永不覆盖(reflow/空缓冲/重连瞬态),保留 last-known。
     //   2) settle 窗口内的「确认空闲(input)」—— 视为 provisional,不降级,保留 last-known。
     //      (settle 期间布局正在重排,即便此刻读到了输入框也可能是半成品;确认 busy/select 仍放行,
     //       因为那是「升级到更具体态」,不会丢思考中。)
     //   3) 其余(确凿 busy/select,或非 settle 期的确认 input)—— 覆盖。
-    if (!r.certain) return
-    if (provisional && r.state.kind === 'input' && prev.kind !== 'input') return
-    if (sameState(prev, r.state)) return
-    set({ state: r.state })
+    //
+    // certainInput(发送闸信号):同口径计算 ——
+    //   - 不确凿(1)/ provisional 期被挡住升级的 input(2)/ 保留 last-known 的 held 帧 → 一律 false
+    //     (S8「/context 冻结」、S14 重连这些 held 帧正确地读作「非 certain-input」,客户端闸拒发,
+    //      最终由 server floor 兜底放行真正空闲的提交);
+    //   - 确凿提交一个 {kind:'input'} → true;确凿提交 busy/select/offline → false。
+    if (!r.certain) {
+      set({ certainInput: false })
+      return
+    }
+    if (provisional && r.state.kind === 'input' && prev.kind !== 'input') {
+      set({ certainInput: false })
+      return
+    }
+    // 迟滞闸(anti-flap):刚落定非 input(select/busy)后的 HYST_MS 内,拒绝单帧 input 降级 ——
+    // 那一帧极可能是菜单进/出时 TUI 重绘的半成品(/model-menu-stuck 的「自发抖动」路径)。
+    // 与上面的 settle 闸同口径:只挡「非 input→input」的降级,绝不挡 busy/select 升级(它们 kind!=='input',
+    // 不进此分支),也不影响 offline(offline 是确凿结论,需覆盖 last-known 才能切「启动会话」)。
+    // 被挡时 certainInput 置 false(同 provisional 路径):发送闸保守拒发,真正空闲由下一帧或 server floor 放行。
+    if (r.state.kind === 'input' && prev.kind !== 'input' && now - lastNonInputTime < HYST_MS) {
+      set({ certainInput: false })
+      return
+    }
+    const certainInput = r.state.kind === 'input'
+    if (sameState(prev, r.state)) {
+      // 同态不重写 state(避免无谓重渲),但 certainInput 仍按本帧刷新(它不参与 sameState 比较)。
+      if (get().certainInput !== certainInput) set({ certainInput })
+      return
+    }
+    // 确凿提交一个非 input(select/busy/offline)→ 记下时刻,供上面的迟滞闸在随后短窗内挡住瞬态 input。
+    if (r.state.kind !== 'input') set({ state: r.state, certainInput, lastNonInputTime: now })
+    else set({ state: r.state, certainInput })
   },
   markSettle: (ms) => {
     const until = Date.now() + ms
@@ -392,9 +493,11 @@ export const useLiveStore = create<LiveState>((set, get) => ({
   setDegraded: (d) => set({ degraded: d }),
   // resetLive:仅「真正换会话(host/sid 变)」时调用 —— 把镜像状态归零、重新进入降级待握手。
   // 瞬时断连 / 重连不得调用它(那会把 busy 抹成 input,正是要修的丢状态)。
-  resetLive: () => set({ state: { kind: 'input' }, degraded: true, settleUntil: 0 }),
+  resetLive: () => set({ state: { kind: 'input' }, certainInput: false, degraded: true, settleUntil: 0, lastNonInputTime: 0 }),
 }))
 
 // 消费侧便捷 hook。
 export const useLiveState = (): CtrlState => useLiveStore((s) => s.state)
 export const useLiveDegraded = (): boolean => useLiveStore((s) => s.degraded)
+// certainInput 发送闸:WS-live 路径下,只有确凿空闲框才放行提交(见 ControlBar.submit)。
+export const useLiveCertainInput = (): boolean => useLiveStore((s) => s.certainInput)
