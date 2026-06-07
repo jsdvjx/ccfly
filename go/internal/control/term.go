@@ -64,6 +64,9 @@ func handleTerm(w http.ResponseWriter, r *http.Request) {
 		ctrlErr(w, 400, "session required")
 		return
 	}
+	// 扛 /clear:前端 /clear 后按「新 sid」算出 cc-<Y[:8]> 连来,解析到真正在跑的 cc-<X[:8]>,
+	// 于是 new-session -A 接上真会话(镜像现场),而非新开一个空的孤儿会话。须在起 tmux 前解析。
+	sess = resolveSessionParam(sess)
 	cwd := r.URL.Query().Get("cwd")
 	cmd := r.URL.Query().Get("cmd")
 

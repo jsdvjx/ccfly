@@ -6,6 +6,7 @@ package control
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -14,6 +15,10 @@ type ctrlOption struct {
 	Num   string `json:"num"`
 	Label string `json:"label"`
 	Cur   bool   `json:"cur"`
+	// Checked 三态(仅多选菜单有意义):*true=已勾选(◉●☑■◼[x])、*false=未勾选(◯○□◻[ ])、
+	// nil=单选菜单(行内无复选框字形)。前端据 nil 与否区分「单选(moveTo+Enter)」与「多选
+	// (moveTo+Space 切换、Enter 确认)」。与 livestate.ts 的 checked?:boolean|undefined 对齐。
+	Checked *bool `json:"checked,omitempty"`
 }
 type ctrlAction struct {
 	Label string   `json:"label"`
@@ -30,12 +35,26 @@ type ctrlState struct {
 	Tokens  string       `json:"tokens,omitempty"`  // busy:本轮 token 数(如 1.2k),从 busy 行解析
 	Tip     string       `json:"tip,omitempty"`     // busy:里世界 Tip 行
 	Elapsed string       `json:"elapsed,omitempty"` // busy:里世界真实运行时间(如 "7s"),从 spinner/interrupt 行解析;抓不到则前端本地兜底
+	Phase   string       `json:"phase,omitempty"`   // busy:特殊阶段(目前仅 "compacting" = /compact 正在压缩上下文)
+	Percent int          `json:"percent,omitempty"` // busy:阶段真实进度百分比(1-100),从压缩进度条解析;0/未给则省略 → 前端不确定态
 	Hint    string       `json:"hint,omitempty"`    // input:底部提示行
 	Suggest string       `json:"suggest,omitempty"` // input:里世界「输入建议」(Prompt suggestions,/config 开)解析出的整条建议文本;仅 input 态且确有建议时给
 }
 
 var (
-	reOpt = regexp.MustCompile(`^\s*(❯|›|>)?\s*(\d+)[.)]\s+(\S.*?)\s*$`)
+	// reOpt — 编号选项行。在「编号 + 标签」之间插入一个【可选】复选框分组(g3),用于识别多选
+	// 菜单(checkbox 风格,Space 切换、Enter 确认),且因其可选,单选菜单(无复选框)照旧命中。
+	//   g1=当前项游标(❯/›/>) g2=编号 g3=复选框字形(可空) g4=标签
+	// 复选框字形:已勾选 ◉●☑■◼ 或 [x]/[X]/[✔];未勾选 ◯○□◻ 或 [ ]/[](空括号)。
+	// anchor:复选框必须紧跟在「编号 + .) + 空白」之后、其后再接「空白 + 标签」,故不会把正文里
+	// 偶然以圆点起头的单选标签误吞为复选框(单选标签通常不以这些字形打头;真复选框后必有空白+文字)。
+	reOpt = regexp.MustCompile(`^\s*(❯|›|>)?\s*(\d+)[.)]\s+([◯◉○●☑■□◻◼]|\[[ xX✔]?\])?\s*(\S.*?)\s*$`)
+	// reCheckOn / reCheckOff — 把复选框字形判成 勾选 / 未勾选。两者皆不命中(g3 为空)= 单选项。
+	reCheckOn  = regexp.MustCompile(`^(?:[◉●☑■◼]|\[[xX✔]\])$`)
+	reCheckOff = regexp.MustCompile(`^(?:[◯○□◻]|\[\s?\])$`)
+	// 多选确认底栏:claude 多选菜单底部含「Space to select / to toggle」一类提示。命中即知是多选,
+	// 据此给前端 Space(切换)动作。与 livestate.ts 的 reSpaceSel 逐条对齐。
+	reSpaceSel = regexp.MustCompile(`(?i)\bspace\b.*\bto\b.*\b(select|toggle)\b`)
 	// 力度行:任意单个圆点字符(◉◈✦○◐● 等都行,不枚举)+ …effort… + ←/→ to adjust。
 	reEffort = regexp.MustCompile(`(?i)^\s*\S\s+(.+?effort.*?)\s*←/→\s*to adjust\s*$`)
 	reFooter = regexp.MustCompile(`(?i)(\b(esc|enter)\b.*\bto\b|←/→\s*to adjust)`)
@@ -44,6 +63,11 @@ var (
 	reVerb   = regexp.MustCompile(`^\s*\S\s+([A-Z][a-zA-Z]+)…`)
 	reTokens = regexp.MustCompile(`([\d.]+[kKmM]?)\s*tokens`)
 	reTip    = regexp.MustCompile(`(?i)\bTip:\s*(.+?)\s*$`)
+	// 压缩阶段(/compact):spinner 行形如 "✻ Compacting conversation…",其下一行是真实进度条
+	// "▓▓▓░░… N%"。reVerb 抓不到 "Compacting"(其后跟 " conversation…" 而非紧贴 …),故单独识别;
+	// 并解析那条进度条上的百分比做「确定态」进度(里世界真给的数,不臆造)。
+	reCompacting = regexp.MustCompile(`(?i)\bCompacting\b`)
+	rePercent    = regexp.MustCompile(`(\d{1,3})\s*%`)
 	// 运行时间:从 spinner / interrupt 行里抓「N s」(如 "(7s · …)" 或 "Crunched for 7s")。
 	// 只在含 spinner 动词或 interrupt 字样的行上匹配,避免命中正文里的 "5s"。
 	reElapsed  = regexp.MustCompile(`\b(\d+)s\b`)
@@ -120,6 +144,32 @@ func detectState(rawText string) ctrlState {
 				}
 			}
 		}
+		// 压缩阶段识别 + 进度百分比解析(与 livestate.ts 逐条对齐)。
+		// 阶段:可见屏任一行命中 "Compacting" → phase=compacting,verb 兜底为 "Compacting"。
+		// 百分比:不再受 spinner 行位置/窄窗约束 —— 进度条("▓▓░… N%")可能离 spinner 行任意远
+		// (中间夹着上一条 prompt 的 dim 鬼影、背景色进度条格被 stripANSI 渲成空格、底部 "esc to interrupt"),
+		// 故扫【整屏】抓 (\d{1,3})% 并取【最后一个】落在 0..100 的匹配 —— 鬼影里的陈旧数字在上、
+		// 当前真实进度数字在进度条行(更靠下),取最后一个即取到权威值。抓不到则 percent 留 0(省略)→ 前端不确定态,绝不臆造。
+		compacting := false
+		for _, ln := range lines {
+			if reCompacting.MatchString(ln) {
+				compacting = true
+				break
+			}
+		}
+		if compacting {
+			st.Phase = "compacting"
+			if st.Verb == "" {
+				st.Verb = "Compacting"
+			}
+			for _, ln := range lines {
+				if m := rePercent.FindStringSubmatch(ln); m != nil {
+					if p, err := strconv.Atoi(m[1]); err == nil && p >= 0 && p <= 100 {
+						st.Percent = p // 不 break:取整屏最后一个 plausible 匹配
+					}
+				}
+			}
+		}
 		return st
 	}
 
@@ -141,13 +191,25 @@ func detectState(rawText string) ctrlState {
 				break
 			}
 		}
-		// 编号选项:自底向上,≥2、从 1 起、含 ❯ 当前项
+		// 编号选项:自底向上,≥2、从 1 起、含 ❯ 当前项。
+		// g3=复选框字形(多选独有,可空):勾选→Checked=*true、未勾选→*false、无字形→nil(单选)。
 		var opts []ctrlOption
 		started := false
 		firstIdx := -1
 		for i := n - 1; i >= 0; i-- {
 			if m := reOpt.FindStringSubmatch(lines[i]); m != nil {
-				opts = append([]ctrlOption{{Num: m[2], Label: reWS.ReplaceAllString(m[3], " "), Cur: m[1] != ""}}, opts...)
+				o := ctrlOption{Num: m[2], Label: reWS.ReplaceAllString(m[4], " "), Cur: m[1] != ""}
+				if box := m[3]; box != "" {
+					// 勾选字形→*true、未勾选字形→*false;均不命中则保持 nil(单选,不该到这,防御)。
+					if reCheckOn.MatchString(box) {
+						v := true
+						o.Checked = &v
+					} else if reCheckOff.MatchString(box) {
+						v := false
+						o.Checked = &v
+					}
+				}
+				opts = append([]ctrlOption{o}, opts...)
 				started = true
 				firstIdx = i
 			} else if started {
@@ -167,9 +229,25 @@ func detectState(rawText string) ctrlState {
 			opts = nil
 		}
 
+		// 多选判定:任一选项带复选框字形(Checked != nil),或底栏含「Space to select/toggle」。
+		// 两路任一命中即多选 —— 据此给前端 Space(切换)动作,并让 UI 渲染复选框+逐项切换。
+		multi := false
+		for _, o := range opts {
+			if o.Checked != nil {
+				multi = true
+				break
+			}
+		}
 		if len(opts) > 0 || effort != "" {
 			joinTail := strings.Join(tail(6), " ")
+			if !multi && reSpaceSel.MatchString(joinTail) {
+				multi = true
+			}
 			actions := []ctrlAction{}
+			// 多选:先给「切换(Space)」动作 —— 把里世界菜单光标移到目标项后按 Space 勾/取消勾选。
+			if multi {
+				actions = append(actions, ctrlAction{Label: "切换", Keys: []string{"Space"}})
+			}
 			if reEnterTo.MatchString(joinTail) {
 				actions = append(actions, ctrlAction{Label: "确认", Keys: []string{"Enter"}})
 			}
@@ -232,9 +310,10 @@ func isClaudeInput(lines []string) bool {
 // claude 2.1.x 渲染实测(tmux capture -e):建议是输入框内的「鬼影补全文本」,直接接在
 // 输入行 "❯"+U+00A0(空输入)之后,整段带 dim 属性(SGR 2);其首字符常压在反显光标块
 // (SGR 7)下,余下为 dim。对比之下,用户真键入的文本是常规属性、光标块在文本尾部。形如:
-//   空建议:  ESC[39m ❯ <U+00A0> ESC[7m <空格> ESC[0m              → 无 dim,无建议
-//   有建议:  ESC[39m ❯ <U+00A0> ESC[7m g ESC[0;2m o ahead ESC[0m  → "go ahead"
-//   真输入:  ESC[39m ❯ <U+00A0> hello world ESC[7m <空格> ESC[0m   → 常规属性,非建议
+//
+//	空建议:  ESC[39m ❯ <U+00A0> ESC[7m <空格> ESC[0m              → 无 dim,无建议
+//	有建议:  ESC[39m ❯ <U+00A0> ESC[7m g ESC[0;2m o ahead ESC[0m  → "go ahead"
+//	真输入:  ESC[39m ❯ <U+00A0> hello world ESC[7m <空格> ESC[0m   → 常规属性,非建议
 //
 // 判据:在输入行(剥色后以 "❯"+U+00A0 起头)上,取带 dim(SGR 2)的那段文本为建议;若紧贴
 // dim 段之前有一个反显(SGR 7)首字符,把它并回建议头(光标压住的就是建议首字)。无 dim 段则无建议。

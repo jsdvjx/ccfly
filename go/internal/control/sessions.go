@@ -21,9 +21,7 @@ package control
 import (
 	"net/http"
 	"os"
-	"os/exec"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -53,7 +51,10 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	host := hostName()
-	live := liveTmuxSessions() // 一次 list-sessions,O(会话数) 查表,廉价
+	// live 判定经 tmuxresolve:扛 /clear——一个 pane 多次 /clear 后名字陈旧,但「当前」会话仍
+	// 应显示 live(见 liveSessionIDs)。一次 list-panes,O(会话数) 查表,廉价。
+	panes := listTmuxPanes()
+	live := liveSessionIDs(panes, snaps)
 
 	rows := make([]sessionRow, 0, len(snaps))
 	for _, s := range snaps {
@@ -70,7 +71,7 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 			MtimeMs:   tsToMs(s.LastTs),
 			AgeSec:    s.AgeSec,
 			Preview:   s.Preview,
-			Live:      live[defaultTmuxName(s.SessionID)],
+			Live:      live[s.SessionID],
 		})
 	}
 	// 按 last_ts 倒序(最近活动在前);时间戳缺失/无法解析的沉底。
@@ -94,21 +95,8 @@ func defaultTmuxName(sid string) string {
 	return "cc-" + sid
 }
 
-// liveTmuxSessions 一次 `tmux list-sessions` 取所有在跑会话名 → set。
-// tmux 不在跑 / 无会话(exit 1)都视作空集(不报错):落地页 live 全 false 即可。
-func liveTmuxSessions() map[string]bool {
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
-	set := map[string]bool{}
-	if err != nil {
-		return set
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		if name := strings.TrimSpace(line); name != "" {
-			set[name] = true
-		}
-	}
-	return set
-}
+// (live 判定已移到 tmuxresolve.go 的 liveSessionIDs:经 listTmuxPanes 一次取 pane 级字段,
+//  按 cwd+最近活动解析,扛得住 /clear——见该文件注释。)
 
 // tsToMs 把 RFC3339 时间戳转毫秒(排序用);空/坏 → 0(沉底)。
 func tsToMs(ts string) int64 {

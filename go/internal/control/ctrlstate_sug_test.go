@@ -101,12 +101,23 @@ func TestDetectStateShellVsClaude(t *testing.T) {
 			want: "busy",
 		},
 		{
-			// F6 CLAUDE select —— 编号选项 + "Enter to confirm · esc to cancel" 底栏 → select。
+			// F6 CLAUDE select(单选)—— 编号选项 + "Enter to confirm · esc to cancel" 底栏 → select。
 			name: "F6_claude_select",
 			raw: "Do you want to proceed?\n" +
 				"❯ 1. Yes\n" +
 				"  2. No\n" +
 				"  Enter to confirm · esc to cancel\n",
+			want: "select",
+		},
+		{
+			// F7 CLAUDE multi-select —— 编号选项带复选框字形 + "Space to select" 底栏 → 仍是 select。
+			// 这是多选菜单的回归护栏:reOpt 的可选复选框分组须命中,detectState 不能因复选框而漏判。
+			name: "F7_claude_multiselect",
+			raw: "Which checks should run?\n" +
+				"❯ 1. ◉ Lint\n" +
+				"  2. ◯ Typecheck\n" +
+				"  3. ◉ Unit tests\n" +
+				"  Space to select · Enter to confirm · esc to cancel\n",
 			want: "select",
 		},
 	}
@@ -118,4 +129,117 @@ func TestDetectStateShellVsClaude(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDetectSelectOptions — 选项解析的逐项断言:
+//
+//	单选(F6 形态):每项 Checked==nil(无复选框),actions 不含「切换」(无 Space)。
+//	多选(F7 形态):复选框字形被解析成 Checked 三态(◉/●/☑→true、◯/○/□→false),
+//	               actions 含「切换(Space)」,且标签里的复选框字形已被剥离。
+//
+// 这是「多选 checkbox 菜单未建模」修复的核心护栏:单选保持原样,多选新增 Checked + Space。
+func TestDetectSelectOptions(t *testing.T) {
+	// 单选:无复选框 → Checked 全 nil、无 Space 动作。
+	t.Run("single_select_no_checkbox", func(t *testing.T) {
+		st := detectState("Do you want to proceed?\n" +
+			"❯ 1. Yes\n" +
+			"  2. No\n" +
+			"  Enter to confirm · esc to cancel\n")
+		if st.Kind != "select" {
+			t.Fatalf("Kind = %q, want select", st.Kind)
+		}
+		if len(st.Options) != 2 {
+			t.Fatalf("len(Options) = %d, want 2", len(st.Options))
+		}
+		for _, o := range st.Options {
+			if o.Checked != nil {
+				t.Fatalf("single-select option %q got Checked=%v, want nil", o.Label, *o.Checked)
+			}
+		}
+		if o := st.Options[0]; o.Label != "Yes" || !o.Cur {
+			t.Fatalf("option[0] = {label:%q cur:%v}, want {Yes true}", o.Label, o.Cur)
+		}
+		if hasAction(st, "切换") {
+			t.Fatalf("single-select should not expose a 切换(Space) action: %+v", st.Actions)
+		}
+		if !hasAction(st, "确认") {
+			t.Fatalf("single-select should expose a 确认(Enter) action: %+v", st.Actions)
+		}
+	})
+
+	// 多选:复选框字形 → Checked 三态、剥离标签里的字形、新增 切换(Space) 动作。
+	t.Run("multi_select_checkboxes", func(t *testing.T) {
+		st := detectState("Which checks should run?\n" +
+			"❯ 1. ◉ Lint\n" +
+			"  2. ◯ Typecheck\n" +
+			"  3. ☑ Unit tests\n" +
+			"  Space to select · Enter to confirm · esc to cancel\n")
+		if st.Kind != "select" {
+			t.Fatalf("Kind = %q, want select", st.Kind)
+		}
+		if len(st.Options) != 3 {
+			t.Fatalf("len(Options) = %d, want 3", len(st.Options))
+		}
+		want := []struct {
+			label   string
+			checked bool
+		}{{"Lint", true}, {"Typecheck", false}, {"Unit tests", true}}
+		for i, w := range want {
+			o := st.Options[i]
+			if o.Label != w.label {
+				t.Fatalf("option[%d].Label = %q, want %q (复选框字形未从标签剥离?)", i, o.Label, w.label)
+			}
+			if o.Checked == nil {
+				t.Fatalf("option[%d] %q got Checked=nil, want %v", i, o.Label, w.checked)
+			}
+			if *o.Checked != w.checked {
+				t.Fatalf("option[%d] %q got Checked=%v, want %v", i, o.Label, *o.Checked, w.checked)
+			}
+		}
+		if !hasAction(st, "切换") {
+			t.Fatalf("multi-select must expose a 切换(Space) action: %+v", st.Actions)
+		}
+		if !hasActionKey(st, "切换", "Space") {
+			t.Fatalf("multi-select 切换 action must send Space: %+v", st.Actions)
+		}
+		if !hasAction(st, "确认") {
+			t.Fatalf("multi-select must expose a 确认(Enter) action: %+v", st.Actions)
+		}
+	})
+
+	// 仅靠底栏「Space to select」判多选(选项不带复选框字形,如纯文本多选)→ 仍给 切换 动作。
+	t.Run("multi_select_by_footer_only", func(t *testing.T) {
+		st := detectState("Pick tags:\n" +
+			"❯ 1. alpha\n" +
+			"  2. beta\n" +
+			"  Space to select · Enter to confirm · esc to cancel\n")
+		if st.Kind != "select" {
+			t.Fatalf("Kind = %q, want select", st.Kind)
+		}
+		if !hasAction(st, "切换") {
+			t.Fatalf("footer-only multi-select must expose a 切换(Space) action: %+v", st.Actions)
+		}
+	})
+}
+
+func hasAction(st ctrlState, label string) bool {
+	for _, a := range st.Actions {
+		if a.Label == label {
+			return true
+		}
+	}
+	return false
+}
+
+func hasActionKey(st ctrlState, label, key string) bool {
+	for _, a := range st.Actions {
+		if a.Label == label {
+			for _, k := range a.Keys {
+				if k == key {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
