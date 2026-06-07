@@ -17,6 +17,7 @@ import { connect, type TtydConn } from './ttyd'
 import { detectState, useLiveStore } from './livestate'
 import { liveTermHandle } from './liveconn'
 import { tmuxName, fetchState } from './api'
+import { startEngine } from './engine/engine'
 
 // 隐藏容器尺寸:够大以容纳 claude 模态/spinner 不折行(列数≈宽/字宽)。固定一份「桌面级」尺寸,
 // 让 detectState 在稳定布局上工作(与可见 ttyd 端尺寸无关,各连接各自 resize 自己的 pane —— 见下「遗留」)。
@@ -58,6 +59,8 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
     term.loadAddon(fit)
     term.open(el)
     liveTermHandle.term = term
+    // 新读屏引擎(shadow):与旧 detectState 并行,驱动新 modelSelect 控件。term 已就绪,无竞态。
+    const stopEngine = startEngine(sid)
 
     // fit():按容器像素算列行,锁定后通知里世界 resize(钉住 pane,根除 80x24)。
     const doFit = () => {
@@ -306,6 +309,7 @@ export function LiveTerm({ host, sid, cwd }: { host: string; sid: string; cwd?: 
 
     return () => {
       disposed = true
+      stopEngine()
       if (watchdog) clearInterval(watchdog)
       if (gateTimer) clearTimeout(gateTimer)
       if (recalcTimer) clearTimeout(recalcTimer)

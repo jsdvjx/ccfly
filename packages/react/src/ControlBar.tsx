@@ -9,7 +9,8 @@ import { storageKey, getConfig } from './config'
 // 否则回落本文件内既有的通用 select 渲染。分类器与各富组件全是纯展示,点击映射回同一套 helpers
 // (navTo/moveTo/toggleAt/act)发键,无任何 parser/state 改动。
 import { selectKind, type RichSelectHelpers } from './select/selectKind'
-import { RichModelSelect } from './select/RichModelSelect'
+import { useEngineState } from './engine/react'
+import { RichModelSelect as EngineModelSelect } from './engine/states/modelSelect'
 import { RichPermissionSelect } from './select/RichPermissionSelect'
 import { RichEffortSelect } from './select/RichEffortSelect'
 import { RichConfirmSelect } from './select/RichConfirmSelect'
@@ -199,6 +200,8 @@ export function ControlBar({
   const live = useLiveState()
   const degraded = useLiveDegraded()
   const certainInput = useLiveCertainInput()
+  // 新读屏引擎当前态(shadow):用于让新 modelSelect 控件接管 /model 选择器(见下方 content 分支)。
+  const engineMatch = useEngineState()
   const [polled, setPolled] = useState<CtrlState>({ kind: 'input' })
   const st = degraded ? polled : live
   // 附件状态(ControlBar 持有;AttachmentBar 只渲染)。加入即上传,submit 漏斗读 donePaths 并进提交。
@@ -490,7 +493,10 @@ export function ControlBar({
   const attachHot = dragging || (st.kind === 'input' && scanWantsImage(lastAssistantText.split('\n')))
 
   let content: ReactNode
-  if (st.kind === 'offline') {
+  if (engineMatch?.kind === 'modelSelect') {
+    // 新引擎接管 /model 选择器:即使旧检测漏判(F1 无字形高亮),新管线照样渲染 + 闭环驱动。
+    content = <EngineModelSelect />
+  } else if (st.kind === 'offline') {
     content = (
       <div className="cbar">
         <div className="cbar-info">会话未在运行</div>
@@ -524,7 +530,8 @@ export function ControlBar({
     // 勾选 ☑、未勾选 ☐(与 AskUserQuestionCard 的 ☑/□ 同族;单选项无复选框)。
     const isMulti = (st.options || []).some((o) => o.checked !== undefined)
     if (kind === 'model') {
-      content = <RichModelSelect st={st} helpers={helpers} />
+      // 旧卡(模型+力度挤一张)弃用 → 改渲新引擎的两步向导(与上方 engineMatch 分支同一组件)。
+      content = <EngineModelSelect />
     } else if (kind === 'permission') {
       content = <RichPermissionSelect st={st} helpers={helpers} />
     } else if (kind === 'sessionScope') {
