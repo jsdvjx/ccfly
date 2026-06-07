@@ -66,7 +66,7 @@ type connectResp struct {
 // Connect enrolls the device against <host>/<code> and holds the mesh tunnel
 // open until ctx is cancelled. target forms: "host/code", "https://host/code",
 // "http://host/code" (loopback hosts default to http).
-func Connect(ctx context.Context, target string) error {
+func Connect(ctx context.Context, target, version string) error {
 	scheme, host, code, err := parseTarget(target)
 	if err != nil {
 		return err
@@ -83,7 +83,7 @@ func Connect(ctx context.Context, target string) error {
 	}
 	st.Host, st.Scheme = host, scheme
 
-	resp, err := enroll(ctx, scheme, host, code, st.PublicKey)
+	resp, err := enroll(ctx, scheme, host, code, st.PublicKey, version)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func Connect(ctx context.Context, target string) error {
 
 // ── enrollment ──
 
-func enroll(ctx context.Context, scheme, host, code, pubkey string) (*connectResp, error) {
+func enroll(ctx context.Context, scheme, host, code, pubkey, version string) (*connectResp, error) {
 	hostname, _ := os.Hostname()
 	body, _ := json.Marshal(map[string]string{
 		"code":       code,
@@ -117,6 +117,7 @@ func enroll(ctx context.Context, scheme, host, code, pubkey string) (*connectRes
 		"hostname":   hostname,
 		"os":         runtime.GOOS,
 		"arch":       runtime.GOARCH,
+		"version":    version, // 上报客户端版本,云端落到 Device 记录,便于在 web 看「设备是否升到新版」
 	})
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()

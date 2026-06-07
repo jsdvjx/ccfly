@@ -144,7 +144,7 @@ func runConnect(ctx context.Context, args []string) error {
 		mesh.SetLocalControlPort(port)
 		log.Printf("ccfly: control service (in-process) on 127.0.0.1:%d", port)
 	}
-	return mesh.Connect(ctx, target)
+	return mesh.Connect(ctx, target, version)
 }
 
 // runInstall installs `ccfly connect` as a persistent OS service (launchd/systemd).
