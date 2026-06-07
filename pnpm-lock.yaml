@@ -51,20 +51,7 @@ importers:
 
   npm/ccfly-linux-x64: {}
 
-  packages/cli:
-    optionalDependencies:
-      ccfly-darwin-arm64:
-        specifier: 0.3.10
-        version: 0.3.10
-      ccfly-darwin-x64:
-        specifier: 0.3.10
-        version: 0.3.10
-      ccfly-linux-arm64:
-        specifier: 0.3.10
-        version: 0.3.10
-      ccfly-linux-x64:
-        specifier: 0.3.10
-        version: 0.3.10
+  packages/cli: {}
 
   packages/react:
     dependencies:
@@ -895,30 +882,6 @@ packages:
 
   caniuse-lite@1.0.30001793:
     resolution: {integrity: sha512-iwSsYWaCOoh26cV8NwNRViHlrfUvYsHDfRVcbtmw0Kg6PJIZZXwMkj1442FYLBGkeUf1juAsU3DTfxW579mrPA==}
-
-  ccfly-darwin-arm64@0.3.10:
-    resolution: {integrity: sha512-YVzLw1xHEBAUT/Sn4SrD0FUKLUdsFxsD27pTi4ZvDRUg6l+BxbpRP6wCUi47azmLoZWaaJYAZSndlMJ+LLTxug==}
-    engines: {node: '>=18'}
-    cpu: [arm64]
-    os: [darwin]
-
-  ccfly-darwin-x64@0.3.10:
-    resolution: {integrity: sha512-t+WECNvSU+SSd6kZxP04gci0sWIStCcvI4K1CsduW3Te1Aqy9W1NFHQlt257GH+reDlx9VUZ7euIqT+8bvYybA==}
-    engines: {node: '>=18'}
-    cpu: [x64]
-    os: [darwin]
-
-  ccfly-linux-arm64@0.3.10:
-    resolution: {integrity: sha512-fLS2/7vpyRyJkeaC0vxqLf3lhp810CDJXUoDNOMrAgnCgRs5ptbdxo9EpjIB0Gl7fvMD4p/bopdzcY/EtQlNuw==}
-    engines: {node: '>=18'}
-    cpu: [arm64]
-    os: [linux]
-
-  ccfly-linux-x64@0.3.10:
-    resolution: {integrity: sha512-5Y4WM1AGEc9fh1STc2oLexkPiPjEz34gH2YTY9qC3Un/dHGtY5ovbkv1km9YvDtlhMHKOz1syXtk9vZOUdxpJA==}
-    engines: {node: '>=18'}
-    cpu: [x64]
-    os: [linux]
 
   ccount@2.0.1:
     resolution: {integrity: sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg==}
@@ -2497,18 +2460,6 @@ snapshots:
   cac@6.7.14: {}
 
   caniuse-lite@1.0.30001793: {}
-
-  ccfly-darwin-arm64@0.3.10:
-    optional: true
-
-  ccfly-darwin-x64@0.3.10:
-    optional: true
-
-  ccfly-linux-arm64@0.3.10:
-    optional: true
-
-  ccfly-linux-x64@0.3.10:
-    optional: true
 
   ccount@2.0.1: {}
 
