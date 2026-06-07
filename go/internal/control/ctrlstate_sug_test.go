@@ -120,6 +120,26 @@ func TestDetectStateShellVsClaude(t *testing.T) {
 				"  Space to select · Enter to confirm · esc to cancel\n",
 			want: "select",
 		},
+		{
+			// F8 CLAUDE permission prompt mid-turn —— 回合进行中弹出的权限/确认菜单同时保留
+			// "esc to interrupt" 行。busy 不得抢清晰 select:既有从 1 起带 ❯ 的编号菜单,判 select。
+			// 这是「busy 误报」(权限弹窗被误显示成 忙碌+中断、菜单无从操作)的回归护栏。
+			name: "F8_permission_prompt_with_interrupt_footer",
+			raw: "Do you want to make this edit to ctrlstate.go?\n" +
+				"❯ 1. Yes\n" +
+				"  2. Yes, and don't ask again this session\n" +
+				"  3. No, and tell Claude what to do differently\n" +
+				"  Enter to confirm · esc to interrupt\n",
+			want: "select",
+		},
+		{
+			// F9 真 busy(无菜单)—— 仅 spinner + interrupt 行,无「从 1 起带游标的编号菜单」→ 仍 busy。
+			// 护栏:looksLikeSelect 分流不得误把真 busy 帧判成 select(它不含编号菜单)。
+			name: "F9_busy_no_menu_stays_busy",
+			raw: "✻ Cogitating… (12s · ↓ 3.1k tokens · esc to interrupt)\n" +
+				"  Tip: use /compact to free up context\n",
+			want: "busy",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

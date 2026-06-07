@@ -76,6 +76,25 @@ func TestScanRunningAgentsSyncCompleted(t *testing.T) {
 	}
 }
 
+// TestScanRunningAgentsTerminalStatuses:后台 agent 的 task-notification 用各种终止态拼写
+//(尤其 JS 系双 l 的 "cancelled"、timed_out、error 等)都应判定完成,不再卡在「运行中」。
+// 这是「已完成却仍显运行」(AgentDock 一直「N 个运行中」)误报的回归护栏。
+func TestScanRunningAgentsTerminalStatuses(t *testing.T) {
+	for _, status := range []string{"cancelled", "canceled", "timed_out", "timeout", "error", "aborted", "interrupted", "failed", "stopped", "killed"} {
+		t.Run(status, func(t *testing.T) {
+			lines := []string{
+				`{"type":"assistant","timestamp":"2026-01-01T00:00:01.000Z","message":{"content":[{"type":"tool_use","id":"tB","name":"Task","input":{"subagent_type":"explorer","description":"bg","run_in_background":true}}]}}`,
+				`{"type":"user","timestamp":"2026-01-01T00:00:01.003Z","toolUseResult":{"status":"async_launched","taskId":"x"},"message":{"content":[{"type":"tool_result","tool_use_id":"tB"}]}}`,
+				`{"type":"queue-operation","operation":"task-notification","timestamp":"2026-01-01T00:00:05.000Z","content":"<task-notification>\n<tool-use-id>tB</tool-use-id>\n<status>` + status + `</status>\n</task-notification>"}`,
+			}
+			got := scanRunningAgentsFromLines(lines)
+			if len(got) != 0 {
+				t.Fatalf("status=%q 应判完成,期望运行中 0,实际 %d: %+v", status, len(got), got)
+			}
+		})
+	}
+}
+
 // TestScanRunningWorkflow:Workflow 的 tool_use 登记为 kind=workflow,从 async_launched 行补 runId/summary。
 //   - W1:tool_use + async_launched(补 runId),无 completed → 运行中,kind=workflow,runId 填好。
 //   - W2:tool_use + async_launched + completed task-notification → 已完成,不出现在运行中。

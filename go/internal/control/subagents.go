@@ -12,7 +12,8 @@ package control
 //     该 tool_use 对应的 async_launched 行(顶层 toolUseResult.runId/summary)补全。
 //  2. 后台 agent 完成:某行(queue-operation / user)的字符串内容含
 //     <task-notification>…<tool-use-id>TUID</tool-use-id>…<status>S</status>…,
-//     S∈{completed,failed,stopped,killed,canceled} → 该 agent 已结束。
+//     S 属 terminalStatuses(completed/failed/stopped/killed/canceled/cancelled/timed_out/
+//     timeout/error/aborted/interrupted)→ 该 agent 已结束。
 //  3. 同步 agent 完成:一条 tool_result(type=user 行,content[] 里 tool_use_id==toolUseId)
 //     且其顶层 toolUseResult.status != "async_launched"(真实结果)。后台那条 async_launched
 //     的 tool_result 要排除。
@@ -48,9 +49,23 @@ var (
 	tnStatusRe  = regexp.MustCompile(`<status>(.*?)</status>`)
 )
 
-// 终止类 task-notification 状态。
+// 终止类 task-notification 状态:出现任一即视为「该 agent 已不再运行」。
+// 兼顾两种拼写(canceled / cancelled —— claude code 多用 JS 系的双 l "cancelled")与其它明确的终止态
+// (timed_out / timeout / error / aborted / interrupted)。漏一个终止态 = 该后台 agent 永远卡在
+// 「运行中」、AgentDock 一直显示「N 个运行中」+ 脉动点(= 用户反馈「busy 误报」的一种:已完成却仍显运行)。
+// 刻意只收【明确表示已结束】的状态;非终止/中间态(如 running/in_progress/async_launched)绝不进此集。
 var terminalStatuses = map[string]bool{
-	"completed": true, "failed": true, "stopped": true, "killed": true, "canceled": true,
+	"completed":   true,
+	"failed":      true,
+	"stopped":     true,
+	"killed":      true,
+	"canceled":    true,
+	"cancelled":   true,
+	"timed_out":   true,
+	"timeout":     true,
+	"error":       true,
+	"aborted":     true,
+	"interrupted": true,
 }
 
 // scanRunningAgents 按 sid 定位主 jsonl(复用 transcriptPath),扫出运行中子代理,

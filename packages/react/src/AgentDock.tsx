@@ -6,8 +6,11 @@ import { openWorkflow } from './blocks/WorkflowCard'
 
 // 表世界「运行中子代理概览」—— 映射里世界 TUI 底部 `↓ to manage` 的 running-agent 概览。
 // 形态:有子代理在跑时,输入框上方常驻一条迷你状态条(N 个运行中 + 脉动点);点开展开列表
-//(顶部 main 行复用主代理 busy 态 + 各运行中子代理行,右侧 elapsed);点某行钻入弹层看其实时内容。
-// 数据:运行中列表来自后端 /subagents(权威,按启动↔完成事件配对);main 行来自 /state。无子代理则整体消失。
+//(各运行中子代理行,右侧 elapsed);点某行钻入弹层看其实时内容。
+// 数据:运行中列表来自后端 /subagents(权威,按启动↔完成事件配对)。无子代理则整体消失。
+// 注:不再渲染「main 行」复述主代理 busy —— 主代理「工作中」由 ControlBar 的 BusyLine 单一呈现,
+// 这里只管「在跑的子代理/工作流」概览,避免两处都画 busy 面板(两个 busy 面板的重复源)。
+// 仍用 st.kind==='busy' 仅做 shouldPollAgents 门控(子代理只在主代理 busy 期间产生)。
 
 const SPIN = ['◐', '◓', '◑', '◒'] // 脉动月相,示意「运行中」
 const fmtDur = (s: number) => (s < 60 ? s + 's' : Math.floor(s / 60) + 'm' + (s % 60) + 's')
@@ -95,7 +98,6 @@ export function AgentDock({ host, sid }: { host: string; sid: string }) {
     return null
   }
 
-  const mainBusy = st.kind === 'busy'
   // 钻入。普通子代理 → SubagentView 弹层(复用主界面渲染);running=true 强制实时跟随,完成判定由其自身轮询 /subagents 处理。
   //   workflow → openWorkflow 弹层(WorkflowCard 同构详情:phase/agent + 钻入单 agent),按 runId 拉详情。
   const openDrill = (a: RunningAgent) => {
@@ -134,14 +136,8 @@ export function AgentDock({ host, sid }: { host: string; sid: string }) {
 
       {open && (
         <div className="adock-list">
-          {/* main 行:主代理当前活动(复用 /state busy 态)*/}
-          <div className="adock-row adock-main">
-            <span className="adock-glyph">⏺</span>
-            <span className="adock-type">main</span>
-            <span className="adock-desc">{mainBusy ? st.verb || '工作中…' : '空闲'}</span>
-            <span className="adock-meta">{mainBusy ? st.elapsed || '' : ''}</span>
-          </div>
-          {/* 各运行中条目行 → 点击钻入。workflow 行用 🧩 图标 + 「工作流」类型 + adock-wf 样式区隔。 */}
+          {/* 各运行中条目行 → 点击钻入。workflow 行用 🧩 图标 + 「工作流」类型 + adock-wf 样式区隔。
+              不再有「main 行」—— 主代理 busy 由 ControlBar 的 BusyLine 单一呈现,此处只列在跑的子代理/工作流。 */}
           {agents.map((a) => {
             const isWF = a.kind === 'workflow'
             return (

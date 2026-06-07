@@ -111,12 +111,23 @@ func detectState(rawText string) ctrlState {
 
 	// busy:生成中(claude 显示 "… (esc to interrupt)")。
 	// 顺带解析 spinner 动词 / token 数 / Tip 行,喂给表世界还原原版 TUI(抓不到则前端兜底)。
+	//
+	// 关键:busy 不得抢「清晰的 select」。claude 在回合进行中弹出的权限/确认/选择菜单
+	// (如 "Do you want to make this edit?")会同时保留底部 "esc to interrupt" 行 —— 那一帧
+	// 既含 reBusy 又是一个带编号选项 + ❯ 当前项的清晰菜单。若 busy 先吃,用户看到的是「忙碌+中断」
+	// 而非该选菜单 → 无从操作,且 ControlBar 误报 busy(= 用户反馈「busy 误报」的可确认根因)。
+	// 故:仅当本帧【不是】清晰 select 时才认 busy;是清晰 select 则放给下方 select 分支。
+	// 保守判据(looksLikeSelect):底栏有 footer + 编号选项(≥2、从 1 起、含 ❯ 当前项)。真正在生成、
+	// 没弹菜单的 busy 帧绝不含「从 1 起带游标的编号菜单」,故此分流不会漏判真 busy。
 	busy := false
 	for _, ln := range tail(8) {
 		if reBusy.MatchString(ln) {
 			busy = true
 			break
 		}
+	}
+	if busy && looksLikeSelect(lines, tail) {
+		busy = false // 清晰 select 帧:让 select 胜出,busy 不抢
 	}
 	if busy {
 		st := ctrlState{Kind: "busy"}
@@ -290,6 +301,50 @@ func detectState(rawText string) ctrlState {
 		return ctrlState{Kind: "input", Suggest: suggest}
 	}
 	return ctrlState{Kind: "offline"}
+}
+
+// looksLikeSelect 判断「本帧是不是一个清晰的选择菜单」(底栏 footer + 编号选项 ≥2、从 1 起、含 ❯ 当前项)。
+// 仅用于「busy 不抢 select」分流:回合进行中弹出的权限/确认/选择菜单会同时保留 "esc to interrupt" 行,
+// 那一帧既命中 reBusy 又是清晰菜单 —— 据此把它判给 select 而非 busy。判据刻意保守(必须有从 1 起、
+// 带游标的编号菜单),真正在生成的 busy 帧不会命中,故不漏判真 busy。
+// 注意:此处仅做「是否清晰 select」的布尔判定,真正的选项/标题/动作解析仍由下方 modal 分支完成
+// (两处用同一组正则 reFooter/reOpt,口径一致)。与 livestate.ts 的 looksLikeSelect 逐条对齐。
+func looksLikeSelect(lines []string, tail func(int) []string) bool {
+	// 模态门槛:最后 6 行须有底栏(esc/enter to … 或 ←/→ to adjust)。
+	modal := false
+	for _, ln := range tail(6) {
+		if reFooter.MatchString(ln) {
+			modal = true
+			break
+		}
+	}
+	if !modal {
+		return false
+	}
+	// 编号选项:自底向上,≥2、从 1 起、含 ❯ 当前项(与下方 modal 分支同口径)。
+	n := len(lines)
+	var opts []ctrlOption
+	started := false
+	for i := n - 1; i >= 0; i-- {
+		if m := reOpt.FindStringSubmatch(lines[i]); m != nil {
+			opts = append([]ctrlOption{{Num: m[2], Cur: m[1] != ""}}, opts...)
+			started = true
+		} else if started {
+			if strings.TrimSpace(lines[i]) == "" {
+				continue
+			}
+			break
+		}
+	}
+	if len(opts) < 2 || opts[0].Num != "1" {
+		return false
+	}
+	for _, o := range opts {
+		if o.Cur {
+			return true
+		}
+	}
+	return false
 }
 
 // isClaudeInput 判断「当前屏是否确为 claude 的输入框」(用于默认分支区分 claude-idle vs shell 提示符)。

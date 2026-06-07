@@ -231,6 +231,40 @@ function shellEvidence(lines: string[]): boolean {
   return false
 }
 
+// looksLikeSelect 判断「本帧是不是一个清晰的选择菜单」(底栏 footer + 编号选项 ≥2、从 1 起、含 ❯ 当前项)。
+// 仅用于「busy 不抢 select」分流:回合进行中弹出的权限/确认/选择菜单会同时保留 "esc to interrupt" 行,
+// 那一帧既命中 reBusy 又是清晰菜单 —— 据此把它判给 select 而非 busy。判据刻意保守(必须有从 1 起、
+// 带游标的编号菜单),真正在生成的 busy 帧不会命中,故不漏判真 busy。
+// 注意:此处仅做布尔判定,真正的选项/标题/动作解析仍由下方 modal 分支完成(同口径 reFooter/reOpt)。
+// 与 ctrlstate.go 的 looksLikeSelect 逐条对齐。
+function looksLikeSelect(lines: string[]): boolean {
+  // 模态门槛:最后 6 行须有底栏(esc/enter to … 或 ←/→ to adjust)。
+  let modal = false
+  for (const ln of tail(lines, 6)) {
+    if (reFooter.test(ln)) {
+      modal = true
+      break
+    }
+  }
+  if (!modal) return false
+  // 编号选项:自底向上,≥2、从 1 起、含 ❯ 当前项(与下方 modal 分支同口径)。
+  const n = lines.length
+  const opts: { num: string; cur: boolean }[] = []
+  let started = false
+  for (let i = n - 1; i >= 0; i--) {
+    const m = reOpt.exec(lines[i])
+    if (m) {
+      opts.unshift({ num: m[2], cur: !!m[1] })
+      started = true
+    } else if (started) {
+      if (lines[i].trim() === '') continue
+      break
+    }
+  }
+  if (opts.length < 2 || opts[0].num !== '1') return false
+  return opts.some((o) => o.cur)
+}
+
 // ── detectState:对齐 ctrlstate.go 的 detectState,吃 xterm buffer ──
 // 返回 DetectResult(state + certain),由 store.applyDetect 决定是否覆盖 last-known。
 export function detectState(term: Terminal): DetectResult {
@@ -240,12 +274,22 @@ export function detectState(term: Terminal): DetectResult {
   const n = lines.length
 
   // busy:尾 8 行含 "esc to interrupt"。
+  //
+  // 关键:busy 不得抢「清晰的 select」。claude 在回合进行中弹出的权限/确认/选择菜单
+  // (如 "Do you want to make this edit?")会同时保留底部 "esc to interrupt" 行 —— 那一帧
+  // 既含 reBusy 又是一个带编号选项 + ❯ 当前项的清晰菜单。若 busy 先吃,用户看到的是「忙碌+中断」
+  // 而非该选菜单 → 无从操作,且 ControlBar 误报 busy(= 用户反馈「busy 误报」的可确认根因)。
+  // 故:仅当本帧【不是】清晰 select 时才认 busy;是清晰 select 则放给下方 select 分支。
+  // 与 ctrlstate.go 逐条对齐(looksLikeSelect:底栏 footer + 编号选项 ≥2、从 1 起、含 ❯ 当前项)。
   let busy = false
   for (const ln of tail(lines, 8)) {
     if (reBusy.test(ln)) {
       busy = true
       break
     }
+  }
+  if (busy && looksLikeSelect(lines)) {
+    busy = false // 清晰 select 帧:让 select 胜出,busy 不抢
   }
   if (busy) {
     const st: CtrlState = { kind: 'busy' }
