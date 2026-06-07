@@ -34,6 +34,10 @@ export interface SendBody {
   // 只在 enter:true 时有意义,而 enter:true 已强制走 /sendkeys(下方),故 clear 随 body 自动转发,
   // 无 WS 专属代码。纯 WS 打字轨(无 enter)从不带 clear。
   clear?: boolean
+  // images:本次提交要「原生粘贴」进里世界的、已上传图片的设备绝对路径(由 /upload 返回)。
+  // 仅配 enter:true(原子提交)出现;enter:true 已强制走 /sendkeys,故 images 随 body 自动转发到设备,
+  // 由设备「设系统剪贴板 → C-v」原生嵌图(`[Image #N]`),不再把路径当文本拼进消息。纯 WS 打字轨无此字段。
+  images?: string[]
 }
 
 // WS 是否此刻可用作发键通道:有 conn、已握手 ready、且 store 未判降级。

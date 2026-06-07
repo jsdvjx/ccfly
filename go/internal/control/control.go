@@ -42,6 +42,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -132,6 +133,16 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		// (web/TUI 输入框状态分裂的整类 bug 之根因 A)。raw keys(菜单方向键/Space/Esc)与
 		// 纯打字不带 Clear,故菜单导航/中断完全不受影响。
 		Clear bool `json:"clear"`
+		// Images:本次提交要「原生粘贴」进里世界输入框的、已落盘上传图片的**绝对路径**列表
+		// (前端先经 /upload 落盘到会话 cwd 的 .ccfly-uploads/,再把返回的绝对路径填这里)。
+		//
+		// 为什么不再像旧版那样把路径当文本拼进消息:把 "/abs/path.png" 当字面文本打进去,里世界
+		// Claude 只是「看到一条含路径的文字」,并不一定把它当图读;而真正的 Claude Code 体验是
+		// **粘贴图片 → 输入框里出现 `[Image #N]` 占位**(原生嵌图、随消息一起带上、不提交不显路径)。
+		// 经本机实测,这一原生嵌图可被复刻:把目标图片塞进**系统剪贴板**,再向 tmux 会话发一次
+		// `C-v`,里世界即吐出 `[Image #N]`(详见 handleSendKeys 的原子提交分支)。故 Images 走的是
+		// 「设置 OS 剪贴板 → C-v」这条原生粘贴通道,而非文本拼接。仅在原子提交(Clear+Enter)时消费。
+		Images []string `json:"images"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		ctrlErr(w, 400, "bad json")
@@ -143,7 +154,11 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	// 解析到真正在跑的 tmux:前端 /clear 后仍按「新 sid」发来 cc-<Y[:8]>,这里落到真 pane cc-<X[:8]>。
 	sess := resolveSessionParam(req.Session)
-	// SERVER FLOOR(权威兜底,根因 B 的最后一道闸):仅对「原子提交」(Clear+Text+Enter)生效。
+	// 原子提交判定:Clear+Enter,且「有文本 或 有待粘贴图片」。
+	// 注意把「纯发图」(Text 空、Images 非空)也算作原子提交 —— 否则纯图消息既过不了 server floor、
+	// 也走不进下面的图片原生粘贴分支,图片会被悄悄丢弃。server floor 与图片粘贴共用这一条件。
+	atomicSubmit := req.Clear && req.Enter && (req.Text != "" || len(req.Images) > 0)
+	// SERVER FLOOR(权威兜底,根因 B 的最后一道闸):仅对「原子提交」生效。
 	// 在落键前重新抓一次实时画面、跑同一套 detectState;若此刻里世界不是 input 态(busy/select/offline),
 	// 一律 409 拒发、原样不送任何键。这一步关掉「客户端视图陈旧/错上下文」的窗口:
 	//   - 客户端 certain 门已经快速拒了大多数错时机(UX 友好),但它只信客户端那份可能陈旧的视图;
@@ -152,7 +167,7 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 	//     往运行中的回合或权限菜单误发(灾难性的「自动批准权限菜单」)在结构上也不可能发生。
 	// 仅提交分支过闸;raw keys / 纯打字不过(菜单导航、中断、实时打字必须永远可用)。
 	// 代价:每次提交多一次 capture-pane(亚 100ms,仅提交时、非每键),对聊天提交完全可接受。
-	if req.Clear && req.Enter && req.Text != "" {
+	if atomicSubmit {
 		out, err := exec.Command("tmux", "capture-pane", "-t", sess, "-p", "-e").CombinedOutput()
 		// 抓屏失败(pane 不在)= offline,等同非 input,照样 409 拒发。
 		kind := "offline"
@@ -164,28 +179,61 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// 合法图片路径:仅在原子提交分支、且 darwin 上才走「剪贴板 + C-v」原生粘贴通道(见下)。
+	// 每条都先过 containment 终检(只允许会话 .ccfly-uploads/ 内的已上传文件),逐个解析其剪贴板类。
+	// 非 darwin 没有可靠的「图片进剪贴板」方案 → 这些路径回退旧行为:把绝对路径当文本拼进消息(见 textPayload)。
+	var pasteImgs []imgClip // darwin:要 设置剪贴板→C-v 的图片(已过 containment)
+	var fallbackPaths []string // 非 darwin:回退「路径拼进文本」的图片
+	if atomicSubmit && len(req.Images) > 0 {
+		// containment 复用:uploadDirForSession 解析出的目录,与 upload.go 落盘口径**完全一致**
+		// (resolveSessionParam 扛 /clear → 反查 sid → sidCwd 取冻结 cwd → <cwd>/.ccfly-uploads/,
+		//  兜底 ~/.ccfly/uploads/)。validateUploadPath 再用与 upload.go 同款的
+		// EvalSymlinks(dir)+filepath.Rel 终检,确保每条 Images 路径真落在该目录之内 ——
+		// 绝不 osascript 读任意路径(否则等于把「读任意本机文件进剪贴板」的能力开给不可信前端)。
+		dir := uploadDirForSession(req.Session)
+		for _, p := range req.Images {
+			real, ok := validateUploadPath(dir, p)
+			if !ok {
+				continue // 静默跳过越界/不存在路径(纵深防御:决不读未通过 containment 的路径)
+			}
+			if runtime.GOOS == "darwin" {
+				pasteImgs = append(pasteImgs, imgClip{path: real, class: pngfClassForExt(real)})
+			} else {
+				// TODO: linux xclip/wl-copy image clipboard —— 暂无可靠的图片进剪贴板方案,
+				// 故在非 darwin 上回退旧行为:把已校验的绝对路径当文本拼进消息(空格分隔)。
+				fallbackPaths = append(fallbackPaths, real)
+			}
+		}
+	}
+
+	// textPayload:真正要 `send-keys -l --` 打进去的字面文本。darwin 走原生粘贴(图不进文本);
+	// 非 darwin 回退时,把 fallbackPaths 以空格接在用户文本之后(与旧版一致:全程单行、无换行字节)。
+	textPayload := req.Text
+	if len(fallbackPaths) > 0 {
+		textPayload = strings.TrimSpace(strings.Join(append([]string{req.Text}, fallbackPaths...), " "))
+	}
+
 	var cmds [][]string
 	// CLEAR PRIMITIVE(根因 A):提交前先硬清空里世界当前输入行,再打字。
 	// 用 `C-a C-k`(行首 + 杀到行尾)而非单个 C-u —— C-u 在部分 readline 模式下只杀「光标→行首」,
 	// C-a 先把光标移到行首、C-k 再杀到行尾,无论光标在哪都确定性清空整行;空行上是安全 no-op、幂等。
-	// 落键顺序变为:[C-a C-k] → [-l -- text] → [Enter]:打字前行空、Enter 后行被消费,拼接结构上不可能。
+	// 落键顺序变为:[C-a C-k] → [-l -- text] →(各图 剪贴板+C-v)→ [Enter]:打字前行空、Enter 后行被消费,拼接结构上不可能。
 	// 仅在提交分支(已被上面 server floor 过闸)生效;放在字面文本命令之前 PREPEND。
-	if req.Clear && req.Enter && req.Text != "" {
+	if atomicSubmit {
 		cmds = append(cmds, []string{"send-keys", "-t", sess, "C-a", "C-k"})
 	}
 	// -l = literal(原样字面),避免把 "/model" 之类当按键名解析;-- 终止选项解析。
-	if req.Text != "" {
-		cmds = append(cmds, []string{"send-keys", "-t", sess, "-l", "--", req.Text})
+	// 用 textPayload(darwin=纯用户文本;非 darwin=用户文本+回退路径)。空串则不打字(纯发图也成立)。
+	if textPayload != "" {
+		cmds = append(cmds, []string{"send-keys", "-t", sess, "-l", "--", textPayload})
 	}
 	// 具名键(Escape / C-c / Up …)不带 -l。
 	if len(req.Keys) > 0 {
 		args := append([]string{"send-keys", "-t", sess, "--"}, req.Keys...)
 		cmds = append(cmds, args)
 	}
-	if req.Enter {
-		cmds = append(cmds, []string{"send-keys", "-t", sess, "Enter"})
-	}
-	if len(cmds) == 0 {
+	// 先把「clear + 打字 + 具名键」这批确定性 tmux 命令依次发出(图片粘贴在它们之后、Enter 之前)。
+	if len(cmds) == 0 && len(pasteImgs) == 0 && !req.Enter {
 		ctrlErr(w, 400, "nothing to send")
 		return
 	}
@@ -195,7 +243,128 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// ── 图片原生粘贴(darwin)──:对每张已过 containment 的图,先把它塞进系统剪贴板,再发一次 C-v。
+	// 里世界 Claude Code 收到 C-v 时从剪贴板取图,在输入框就地吐出 `[Image #N]` 占位(原生嵌图,
+	// 不提交、不显路径)—— 这正是「真实粘贴图片」的体验,经本机实测可复刻(见 Images 字段注释)。
+	// 时序:osascript 设剪贴板与 C-v 之间留 ~150ms 让剪贴板写入落定(否则 C-v 可能取到上一张/空),
+	// 多图之间也留一小段,确保里世界逐张吃进、序号(#1 #2 …)不串。
+	for i, im := range pasteImgs {
+		if err := setClipboardImageDarwin(im.path, im.class); err != nil {
+			// 单张设剪贴板失败不毁整条提交:跳过这张,继续其余(已打的文本/已粘的图仍在框里)。
+			log.Printf("ccfly control: set clipboard for %s failed: %v (skip this image)", im.path, err)
+			continue
+		}
+		time.Sleep(150 * time.Millisecond) // 剪贴板写入落定窗口
+		if out, err := exec.Command("tmux", "send-keys", "-t", sess, "C-v").CombinedOutput(); err != nil {
+			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
+			return
+		}
+		if i < len(pasteImgs)-1 {
+			time.Sleep(150 * time.Millisecond) // 多图间隔:让里世界逐张吃进、`[Image #N]` 序号不串
+		}
+	}
+
+	// 最后整体提交:Enter 是独立按键事件(非粘贴),里世界把「文本 + 各 [Image #N]」作一条消息发出。
+	// 防空提交护栏:仅当是「纯发图」原子提交(无文本、无回退路径)且最终一张图都没真粘进去
+	//   (全部图片未过 containment / 设剪贴板失败)时,框里其实空空如也 —— 此刻发 Enter 会提交一条
+	//   空消息(打扰里世界)。故此情形下吞掉 Enter,返回 ok:false 让前端知道「图片未粘成、未提交」。
+	//   其余情形(有文本 / 至少粘进一张图 / 普通非提交回车)照常发 Enter。
+	if req.Enter && atomicSubmit && textPayload == "" && len(pasteImgs) == 0 {
+		ctrlJSON(w, 200, map[string]any{"ok": false, "kind": "input", "reason": "no image pasted"})
+		return
+	}
+	if req.Enter {
+		if out, err := exec.Command("tmux", "send-keys", "-t", sess, "Enter").CombinedOutput(); err != nil {
+			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
+			return
+		}
+	}
 	ctrlJSON(w, 200, map[string]any{"ok": true})
+}
+
+// imgClip 描述一张待原生粘贴的图片:已过 containment 的真实路径 + 其 AppleScript 剪贴板类(«class …»)。
+type imgClip struct {
+	path  string // EvalSymlinks 解析后的真实绝对路径(已确认落在会话 .ccfly-uploads/ 内)
+	class string // PNGf / JPEG / GIFf / TIFF(按扩展名选,见 pngfClassForExt)
+}
+
+// validateUploadPath 对一条客户端给的图片路径做与 upload.go **同款**的 containment 终检:
+// 只允许它落在 dir(会话 .ccfly-uploads/,由 uploadDirForSession 解析)之内,抗符号链接 + 跨平台。
+// 通过则返回该文件 EvalSymlinks 后的真实路径与 true;任何越界/不存在/可疑路径 → ("", false)。
+//
+// 安全要旨(与 upload.go 落盘终检对称,见其注释):决不能让不可信前端指定任意路径再去 osascript 读取
+// (那等于「读任意本机文件进剪贴板」的提权)。故:
+//   - 对 dir 与目标文件各做 EvalSymlinks 取真实物理路径(解开沿途所有 link,看穿预置的逃逸 symlink);
+//   - 再用 filepath.Rel 判定文件真在该物理目录之内(Rel 结果不得为 ".." / 以 ".."+sep 开头 / 绝对路径);
+//   - 目标必须是已存在的**普通文件**(EvalSymlinks 要求存在;额外拒目录/特殊文件)。
+func validateUploadPath(dir, p string) (string, bool) {
+	if strings.TrimSpace(p) == "" {
+		return "", false
+	}
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", false // dir 不存在(本会话从未上传过)→ 无可信容器,一律拒
+	}
+	cleanDir := filepath.Clean(realDir)
+	realFile, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "", false // 文件不存在 / 路径里有断链 symlink:拒
+	}
+	if fi, err := os.Stat(realFile); err != nil || !fi.Mode().IsRegular() {
+		return "", false // 非普通文件(目录/设备/FIFO…):拒,绝不 osascript 读
+	}
+	cleanFile := filepath.Clean(realFile)
+	rel, err := filepath.Rel(cleanDir, cleanFile)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", false // 越界:不在 .ccfly-uploads/ 之内
+	}
+	return cleanFile, true
+}
+
+// pngfClassForExt 按扩展名选 AppleScript 剪贴板图片类(«class …»)。剪贴板里的「图片数据」
+// 需带正确的类型标识里世界才认得;未知扩展默认按 PNGf(最常见、上传截图多为 png)。
+func pngfClassForExt(p string) string {
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".png":
+		return "PNGf"
+	case ".jpg", ".jpeg":
+		return "JPEG"
+	case ".gif":
+		return "GIFf"
+	case ".tif", ".tiff":
+		return "TIFF"
+	default:
+		return "PNGf"
+	}
+}
+
+// setClipboardImageDarwin 在 macOS 上把一张图片文件读进系统剪贴板(供随后的 C-v 原生粘贴)。
+// 实现:osascript 跑一句 AppleScript —— `set the clipboard to (read (POSIX file "<p>") as «class PNGf»)`。
+//
+// 注入安全(关键):path 来自不可信前端,绝不能拼进 shell(已用 exec.Command 传参、无 shell),
+// 但它会进入 AppleScript 源串,故必须对 AppleScript 字符串字面做正确转义 —— 见 appleScriptQuote:
+// 把反斜杠与双引号转义后用双引号包起来,这样含空格/引号/反斜杠的路径也不会越出字符串字面、
+// 更不可能注入 AppleScript 语句。class(PNGf/JPEG/…)来自我们自己的白名单(pngfClassForExt),非客户端可控。
+// osascript 退出非 0(读图失败/类型不符)→ 返回 err,调用方据此跳过该图、不发 C-v。
+func setClipboardImageDarwin(p, class string) error {
+	// 形如:set the clipboard to (read (POSIX file "<quoted-path>") as «class PNGf»)
+	// «» 是 0xC2AB / 0xC2BB(法文角引号),AppleScript 的原始类标识语法;直接写进源串即可。
+	script := "set the clipboard to (read (POSIX file " + appleScriptQuote(p) + ") as «class " + class + "»)"
+	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("osascript: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// appleScriptQuote 把任意字符串安全地转成一个 AppleScript 双引号字符串字面:
+// 反斜杠 \ → \\,双引号 " → \",再两端包双引号。这样不可信路径无论含什么字符,都被关在字符串
+// 字面里,既不会提前闭合字符串、也无从拼出可执行的 AppleScript 语句(切断 osascript 注入面)。
+func appleScriptQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }
 
 func handleCapture(w http.ResponseWriter, r *http.Request) {

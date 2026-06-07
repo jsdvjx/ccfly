@@ -328,7 +328,10 @@ export interface SendResult {
 export async function sendKeys(
   _host: string,
   tsess: string,
-  body: { text?: string; keys?: string[]; enter?: boolean; clear?: boolean },
+  // images?: 本次提交要「原生粘贴」进里世界的、已上传图片的设备绝对路径(由 /upload 返回)。
+  // 设备端在原子提交时把每张图塞进系统剪贴板再发 C-v,里世界就地吐 `[Image #N]`(原生嵌图,
+  // 不再把路径当文本拼进消息);随 JSON body 透传,无其它传输变化。详见 ControlBar submit 注释。
+  body: { text?: string; keys?: string[]; enter?: boolean; clear?: boolean; images?: string[] },
 ): Promise<SendResult> {
   try {
     const r = await xf(xb() + '/sendkeys', {

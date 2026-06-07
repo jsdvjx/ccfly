@@ -312,24 +312,17 @@ export function ControlBar({
   const submit = (payload: string): void => {
     // 重入闸:一次提交在飞时拒绝再次提交(防双发,且让「冻结附件集」窗口语义清晰)。
     if (submittingRef.current) return
-    // 附件融合:把已成功上传的设备绝对路径并进本次提交。
-    //   - 有文本:文本在前、路径接在后(里世界 Claude 据绝对路径读图/读文件)。
-    //   - 无文本:只发路径(纯「发图」也成立)。
+    // 附件融合(原生嵌图,不再拼进文本):把已成功上传的设备绝对路径作 images 字段随本次提交透传,
+    // 由设备端「设系统剪贴板 → 发 C-v」原生粘贴成 `[Image #N]`(就像真在 Claude Code 里粘贴图片),
+    // 而非旧版把 "/abs/path.png" 当字面文本拼进消息。这样:
+    //   - 图片真正以「图」的形式随消息带上(里世界吐 [Image #N] 占位),而非一行容易被当普通文字的路径;
+    //   - 文本就是用户原文(干净、可含空格/任意字符),不再受「路径拼接/空格转义/换行=提交」那套老约束。
     // 上传仍在飞:由 canSend(含 !anyUploading)禁发;这里取 donePaths 是「此刻已落盘成功项」快照
     //   (与下方冻结附件改动配合,杜绝提交期间集变化的竞态)。
-    //
-    // 【用空格连接、绝不用换行】—— 这是本 bug 的根因与修复:
-    //   提交走 /sendkeys → 设备 `tmux send-keys -l -- <text>` 把整串当**字面**一次性打进输入框。
-    //   裸 `\n` 在 Claude TUI = 一次「回车提交」:文本后的换行会**当场把消息提交掉**(只发了文本),路径行
-    //   落进刚清空的框成了孤儿 → 表现就是「图片没带进消息」。而 `\`+LF 软换行能否被 TUI 认成「插入换行不提交」
-    //   依赖里世界对裸 LF 字节的处理,不可靠。故改用空格:全程单行、零换行字节,末尾那记 Enter 整体提交,路径稳稳带上
-    //   (上传路径是 UUID 文件名、无空格,不需引号)。
-    //   既有局限:若用户文本【自身】含换行(textarea 里 Shift+Enter),仍会触发同样的「换行=提交」—— 那是上传无关的
-    //   老问题,根治需设备端按 bracketed-paste 注入多行(后续);本修复只保证「文本 + 上传路径」这条路稳。
     const paths = attachments.donePaths
-    const finalPayload = [payload, ...paths].filter(Boolean).join(' ')
-    const t = finalPayload.trim()
-    if (!t) return // 空/纯空白且无附件:不发(也绝不发一条孤零零的 clear+Enter)
+    const t = payload.trim()
+    // 纯文本为空但有图片 → 仍提交(纯「发图」消息);文本与图片都空才不发(绝不发孤零零的 clear+Enter)。
+    if (!t && paths.length === 0) return
     // 客户端闸:WS-live 要求 certainInput;降级只看 st.kind(理由见上)。
     // 提交时刻从 store 直读最新值(而非用 render 时捕获的闭包值),避免陈旧闭包导致错判。
     const certainNow = useLiveStore.getState().certainInput
@@ -345,7 +338,9 @@ export function ControlBar({
       submittingRef.current = false
       setSubmitting(false)
     }
-    act({ text: t, enter: true, clear: true })
+    // 原子提交:clear:true 让设备先清空里世界输入行,只送 textarea 内容;images 让设备原生粘贴上传图。
+    // (text 可为空、images 非空 = 纯发图;设备端会跳过打字、只 C-v 粘图后 Enter。)
+    act({ text: t, enter: true, clear: true, images: paths })
       .then((r) => {
         if (r.ok) {
           flash('已发送')
