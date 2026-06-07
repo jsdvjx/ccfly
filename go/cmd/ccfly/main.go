@@ -59,7 +59,7 @@ func main() {
 			log.Fatalf("connect: %v", err)
 		}
 	case "install":
-		if err := runInstall(os.Args[2:]); err != nil {
+		if err := runInstall(ctx, os.Args[2:]); err != nil {
 			log.Fatalf("install: %v", err)
 		}
 	case "uninstall":
@@ -108,12 +108,12 @@ func runConnect(ctx context.Context, args []string) error {
 	noServe := fs.Bool("no-serve", false, "don't run the control service in-process; proxy the overlay to a separate `ccfly serve` (CCFLY_LOCAL_PORT, default 7699)")
 	claudeDir := fs.String("claude-dir", os.Getenv("CCFLY_CLAUDE_DIR"), "Claude projects dir for the in-process control service (default ~/.claude/projects)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly connect <host>/<code> [--no-serve] [--claude-dir <dir>]")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly connect <host>[/<code>] [--no-serve] [--claude-dir <dir>]")
 		fs.PrintDefaults()
 	}
 	if len(args) < 1 || args[0] == "" {
 		fs.Usage()
-		return errors.New("missing <host>/<code>")
+		return errors.New("missing <host>[/<code>] — 纯 host(如 cc.hn)走无码网页配对,带 /<code> 走连接码")
 	}
 	target := args[0]
 	if err := fs.Parse(args[1:]); err != nil {
@@ -148,22 +148,37 @@ func runConnect(ctx context.Context, args []string) error {
 }
 
 // runInstall installs `ccfly connect` as a persistent OS service (launchd/systemd).
-func runInstall(args []string) error {
+//
+// 无码配对的关键点:配对是交互式的(要在浏览器里点「批准」),只能在 install 时跑一次。
+// 所以对纯 host 目标,这里先交互式配对一次把设备身份落盘,再安装服务;装好的服务跑
+// `connect <host>`,凭已保存身份重连——KeepAlive 重启不会每次重新配对(同一台设备身份)。
+// 带 /<code> 的目标无需交互(连接码即凭证),直接装服务即可,行为与既有完全一致。
+func runInstall(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	system := fs.Bool("system", false, "system-wide service (needs sudo; survives logout/reboot)")
 	claudeDir := fs.String("claude-dir", "", "Claude projects dir (default ~/.claude/projects)")
 	dry := fs.Bool("dry-run", false, "print what would be done; change nothing")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly install <host>/<code> [--system] [--claude-dir <dir>] [--dry-run]")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly install <host>[/<code>] [--system] [--claude-dir <dir>] [--dry-run]")
 		fs.PrintDefaults()
 	}
 	if len(args) < 1 || args[0] == "" {
 		fs.Usage()
-		return errors.New("missing <host>/<code>")
+		return errors.New("missing <host>[/<code>] — 纯 host(如 cc.hn)走无码网页配对,带 /<code> 走连接码")
 	}
 	target := args[0]
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
+	}
+
+	// 纯 host(无码)→ 安装前先交互式配对一次(--dry-run 跳过,只展示要写什么)。
+	// 已配对则 Pair 幂等直接返回。带 /<code> 的 code 目标保持原样,不做交互。
+	// 判定与 mesh 的运行期分发口径一致:剥掉可选的 "scheme://" 前缀后再看是否含 "/"。
+	if isNoCodeTarget(target) && !*dry {
+		fmt.Println("ccfly install: 先完成一次网页配对,再安装常驻服务…")
+		if err := mesh.Pair(ctx, target, version); err != nil {
+			return fmt.Errorf("配对失败,未安装服务: %w", err)
+		}
 	}
 	return svc.Install(svc.Options{Target: target, System: *system, ClaudeDir: *claudeDir, DryRun: *dry})
 }
@@ -186,14 +201,18 @@ Usage:
   ccfly serve [--port 7699] [--bind 127.0.0.1] [--claude-dir <dir>]
       Run the HTTP control service: tmux send-keys / capture, jsonl transcript
       tailing + SSE follow, subagents / workflow read views, session info.
-  ccfly connect <host>/<code> [--no-serve] [--claude-dir <dir>]
-      Enroll with a ccfly-cloud (using a connect code) AND run the control
-      service in-process, then hold the overlay tunnel open — one command serves
-      + joins. --no-serve proxies to a separate "ccfly serve" instead. Loopback
-      hosts use http.
-  ccfly install <host>/<code> [--system] [--claude-dir <dir>] [--dry-run]
+  ccfly connect <host>[/<code>] [--no-serve] [--claude-dir <dir>]
+      Enroll with a ccfly-cloud AND run the control service in-process, then hold
+      the overlay tunnel open — one command serves + joins. Two ways to enroll:
+        • <host>/<code>  连接码流程:用预先生成的连接码直接登记(老用法不变)。
+        • <host>(纯 host,如 cc.hn) 无码网页配对:打印并打开授权链接,在网页里
+          登录批准后自动接入;之后凭已保存身份重连,不会重复配对。
+      --no-serve proxies to a separate "ccfly serve" instead. Loopback hosts use http.
+  ccfly install <host>[/<code>] [--system] [--claude-dir <dir>] [--dry-run]
       Install ccfly connect as a persistent service (macOS launchd / Linux
       systemd) so the device stays joined across logout / reboot / sleep.
+      纯 host 时会先交互式完成一次网页配对再装服务;装好的服务跑 connect <host>,
+      凭已保存身份重连(开机不重复配对)。
       --system = system-wide (sudo, survives logout). Default = user-level.
   ccfly uninstall [--system]
       Remove the service installed by "ccfly install".
@@ -207,6 +226,21 @@ Flags (serve) — env fallbacks in parentheses, flags win:
 
 Security: the service does NOT authenticate. It binds loopback by default;
 front it with a reverse proxy / hub for any remote exposure.`)
+}
+
+// isNoCodeTarget 判定 install/connect 的目标是否走【无码配对】:剥掉可选的 "scheme://"
+// 前缀、去掉首尾多余 "/" 后,若 host 之后还跟着非空段(即真有 "/code")就是连接码流程,
+// 否则纯 host(如 cc.hn / https://cc.hn)走无码。口径必须与 mesh 包内 hasCode 一致。
+func isNoCodeTarget(target string) bool {
+	t := target
+	if i := strings.Index(t, "://"); i >= 0 {
+		t = t[i+3:]
+	}
+	slash := strings.Index(t, "/")
+	if slash < 0 {
+		return true
+	}
+	return strings.Trim(t[slash+1:], "/") == ""
 }
 
 func envOr(key, def string) string {

@@ -19,7 +19,7 @@ import (
 
 // Options configures Install / Uninstall.
 type Options struct {
-	Target    string // "<host>/<code>" for `ccfly connect`
+	Target    string // "<host>/<code>"(连接码)或纯 "<host>"(无码配对) for `ccfly connect`
 	System    bool   // system-wide service (needs root)
 	ClaudeDir string // optional override; default <home>/.claude/projects
 	DryRun    bool   // print what would happen, change nothing
@@ -127,11 +127,11 @@ func run(name string, args ...string) error {
 }
 
 func validate(o Options) error {
+	// Target 可为 "<host>/<code>"(连接码流程)或纯 "<host>"(无码配对:配对已在
+	// install 阶段交互式完成、身份落盘,服务只需 `connect <host>` 凭旧身份重连)。
+	// 两种都合法,这里只校验非空。
 	if strings.TrimSpace(o.Target) == "" {
-		return fmt.Errorf("missing <host>/<code>")
-	}
-	if !strings.Contains(o.Target, "/") {
-		return fmt.Errorf("target %q must be <host>/<code>", o.Target)
+		return fmt.Errorf("missing <host>[/<code>]")
 	}
 	if o.System && !o.DryRun && os.Geteuid() != 0 {
 		return fmt.Errorf("--system needs root: re-run with sudo")

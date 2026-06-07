@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -63,16 +64,31 @@ type connectResp struct {
 	KeepaliveSec   int    `json:"keepalive_sec"`
 }
 
-// Connect enrolls the device against <host>/<code> and holds the mesh tunnel
-// open until ctx is cancelled. target forms: "host/code", "https://host/code",
-// "http://host/code" (loopback hosts default to http).
+// Connect 把设备接入 <target> 并持有 mesh 隧道,直到 ctx 取消。target 形态:
+//   - "<host>/<code>"(及带 scheme 前缀)→ 走【既有 connect code 流程】(POST /connect)
+//   - "<host>"(不含 "/")→ 走【无码配对流程】(/api/pair/start + 轮询);
+//     但若本机对该 host 已有保存的设备身份(私钥+device_id+mesh_token),则直接用
+//     旧身份重连,不再重新配对——这样 install 出来的 launchd/systemd 服务每次重启
+//     都是同一台设备,而不是开机就刷一个新设备。
+//
+// loopback host 默认 http,其余 https(可被显式 scheme 覆盖),与下方 scheme 逻辑一致。
 func Connect(ctx context.Context, target, version string) error {
+	if hasCode(target) {
+		return connectWithCode(ctx, target, version)
+	}
+	return connectNoCode(ctx, target, version)
+}
+
+// ── code 流程(既有,逻辑保持不变)──
+
+// connectWithCode 用连接码把设备登记到 <host>/<code> 并持有隧道。
+func connectWithCode(ctx context.Context, target, version string) error {
 	scheme, host, code, err := parseTarget(target)
 	if err != nil {
 		return err
 	}
 
-	// Reuse this host's key identity if we've connected before; else generate.
+	// 复用本 host 的密钥身份(若之前连过);否则现生成一对。
 	st, _ := loadState(host)
 	if st == nil || st.PrivateKey == "" {
 		priv, pub, err := newKeypair()
@@ -87,6 +103,13 @@ func Connect(ctx context.Context, target, version string) error {
 	if err != nil {
 		return err
 	}
+	return applyEnrollAndHold(ctx, st, resp)
+}
+
+// applyEnroll 把云端返回的登记结果(connectResp)写进 State 并落盘。code / 无码两条路径
+// 共享它——区别只在前面怎么拿到这份 connectResp(POST /connect 还是 pair 轮询的
+// approved)、以及之后是否持有隧道。
+func applyEnroll(st *State, resp *connectResp) error {
 	st.DeviceID = resp.DeviceID
 	st.Name = resp.Name
 	st.Owner = resp.Owner
@@ -100,10 +123,16 @@ func Connect(ctx context.Context, target, version string) error {
 	if err := saveState(st); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
+	log.Printf("ccfly: enrolled as %q (device %s) overlay %s on %s", st.Name, st.DeviceID, st.OverlayIP, st.Host)
+	return nil
+}
 
-	log.Printf("ccfly: enrolled as %q (device %s) overlay %s on %s", st.Name, st.DeviceID, st.OverlayIP, host)
-	fmt.Printf("✓ connected to %s — device %q, overlay IP %s\n  holding mesh tunnel (Ctrl-C to stop)\n", host, st.Name, st.OverlayIP)
-
+// applyEnrollAndHold = applyEnroll + 打印 + 持有隧道。code 流程的尾段。
+func applyEnrollAndHold(ctx context.Context, st *State, resp *connectResp) error {
+	if err := applyEnroll(st, resp); err != nil {
+		return err
+	}
+	fmt.Printf("✓ connected to %s — device %q, overlay IP %s\n  holding mesh tunnel (Ctrl-C to stop)\n", st.Host, st.Name, st.OverlayIP)
 	return runTunnel(ctx, st)
 }
 
@@ -147,6 +176,225 @@ func enroll(ctx context.Context, scheme, host, code, pubkey, version string) (*c
 		return nil, errors.New("enrollment response missing mesh url/token")
 	}
 	return &cr, nil
+}
+
+// ── 无码配对流程(device authorization 风格)──
+
+// pairStartResp 对应云端 POST /api/pair/start 的返回。
+type pairStartResp struct {
+	PairID       string `json:"pairId"`
+	LinkURL      string `json:"linkUrl"`
+	PollToken    string `json:"pollToken"`
+	ExpiresInSec int    `json:"expiresInSec"`
+}
+
+// pairPollResp 对应云端 GET /api/pair/poll 的返回。status=pending|approved|denied|
+// expired;approved 时还内联整份登记结果(connectResp 的超集字段,至少含
+// overlay_ip / mesh_url / mesh_token / device_id),供设备直接复用 code 流程的落盘逻辑。
+type pairPollResp struct {
+	Status string `json:"status"`
+	connectResp
+}
+
+const (
+	pairPollInterval = 3 * time.Second  // 轮询间隔,与文案「每 3s」一致
+	pairLocalTimeout = 10 * time.Minute // 本地兜底超时(云端 pair 记录同为 10min)
+)
+
+// Pair 只做无码配对并把设备身份落盘,然后返回(不持有隧道)。供 `ccfly install <host>`
+// 在安装服务前先交互式配对一次用——配对成功后安装的 launchd/systemd 服务跑
+// `connect <host>`,凭这份已保存身份重连,不会开机就重新配对。若本机对该 host 已有完整
+// 身份则直接跳过配对(幂等)。
+func Pair(ctx context.Context, target, version string) error {
+	scheme, host := parseHost(target)
+	st, err := ensurePaired(ctx, scheme, host, version)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("✓ 已绑定 — device %q, overlay IP %s\n", st.Name, st.OverlayIP)
+	return nil
+}
+
+// connectNoCode 走无码配对:若本机对该 host 已有完整设备身份则直接重连(install 出来
+// 的服务每次重启走这条,不再配对);否则发起 pair/start、打印并尝试打开授权链接、轮询
+// 直到 approved/denied/expired 或本地超时。拿到身份后持有隧道。
+func connectNoCode(ctx context.Context, target, version string) error {
+	scheme, host := parseHost(target)
+	st, err := ensurePaired(ctx, scheme, host, version)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("✓ 已接入 — device %q, overlay IP %s\n  holding mesh tunnel (Ctrl-C to stop)\n", st.Name, st.OverlayIP)
+	return runTunnel(ctx, st)
+}
+
+// ensurePaired 返回该 host 一份可用的、已落盘的设备身份:已有完整身份就直接复用(不配
+// 对),否则发起配对(打印+尝试打开链接、轮询到 approved)并落盘。两条调用方(Pair /
+// connectNoCode)共享它,差别只在拿到身份后是否持有隧道。
+//
+// 「完整身份」判定与 runTunnel 所需字段一致:私钥 + device_id + mesh_url + mesh_token。
+func ensurePaired(ctx context.Context, scheme, host, version string) (*State, error) {
+	if st, _ := loadState(host); st != nil && st.PrivateKey != "" &&
+		st.DeviceID != "" && st.MeshURL != "" && st.MeshToken != "" {
+		st.Host, st.Scheme = host, scheme
+		log.Printf("ccfly: 复用已保存身份(device %s)对接 %s,跳过配对", st.DeviceID, host)
+		return st, nil
+	}
+
+	// 没有可用身份 → 走配对。复用既有密钥(若有残留私钥)或现生成一对。
+	st, _ := loadState(host)
+	if st == nil || st.PrivateKey == "" {
+		priv, pub, err := newKeypair()
+		if err != nil {
+			return nil, fmt.Errorf("generate key: %w", err)
+		}
+		st = &State{PrivateKey: priv, PublicKey: pub}
+	}
+	st.Host, st.Scheme = host, scheme
+
+	start, err := pairStart(ctx, scheme, host, st.PublicKey, version)
+	if err != nil {
+		return nil, err
+	}
+
+	// 显眼地打印授权链接 + 尝试自动打开浏览器(headless / 无桌面时静默忽略错误)。
+	fmt.Printf("\n  在浏览器里打开以下链接,登录后批准绑定本设备:\n\n      %s\n\n", start.LinkURL)
+	openBrowser(start.LinkURL)
+	mins := start.ExpiresInSec / 60
+	if mins <= 0 {
+		mins = 10
+	}
+	fmt.Printf("  等待网页端批准…(链接 %d 分钟内有效,Ctrl-C 取消)\n", mins)
+
+	resp, err := pairPoll(ctx, scheme, host, start.PairID, start.PollToken)
+	if err != nil {
+		return nil, err
+	}
+	// 复用 code 流程的尾段:把 connectResp 落进 State 并保存(但不持有隧道)。
+	if err := applyEnroll(st, resp); err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+// pairStart 发起 POST /api/pair/start(无 session 鉴权),上报本机指纹,拿到配对 id +
+// 链接 + 轮询令牌。请求体字段与云端 handler 约定一致。
+func pairStart(ctx context.Context, scheme, host, pubkey, version string) (*pairStartResp, error) {
+	hostname, _ := os.Hostname()
+	body, _ := json.Marshal(map[string]string{
+		"pubkey":   pubkey,
+		"os":       runtime.GOOS,
+		"arch":     runtime.GOARCH,
+		"version":  version,
+		"hostname": hostname,
+	})
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(cctx, http.MethodPost, scheme+"://"+host+"/api/pair/start", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("发起配对失败(%s): %w", host, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("发起配对被拒(%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var ps pairStartResp
+	if err := json.Unmarshal(data, &ps); err != nil {
+		return nil, fmt.Errorf("配对返回无法解析: %w", err)
+	}
+	if ps.PairID == "" || ps.LinkURL == "" || ps.PollToken == "" {
+		return nil, errors.New("配对返回缺少 pairId/linkUrl/pollToken")
+	}
+	return &ps, nil
+}
+
+// pairPoll 每 ~3s 轮询 GET /api/pair/poll(凭 pollToken 鉴权),直到状态非 pending 或
+// 本地超时。approved → 返回内联的登记结果;denied/expired → 明确报错(由调用方非零退出);
+// 本地超时同样报错。403/404 等异常状态码直接报错终止。
+//
+// 安全:pollToken 是 secret,改走 `Authorization: Bearer` 请求头而非 URL query,
+// 避免出现在浏览器历史、访问日志、Referer 里(云端兼容旧 query 形式,但新客户端走头)。
+func pairPoll(ctx context.Context, scheme, host, pairID, pollToken string) (*connectResp, error) {
+	deadline := time.Now().Add(pairLocalTimeout)
+	pollURL := scheme + "://" + host + "/api/pair/poll?id=" + url.QueryEscape(pairID)
+	t := time.NewTicker(pairPollInterval)
+	defer t.Stop()
+	for {
+		pr, err := pairPollOnce(ctx, pollURL, pollToken)
+		if err != nil {
+			return nil, err
+		}
+		switch pr.Status {
+		case "pending":
+			// 继续轮询
+		case "approved":
+			if pr.MeshURL == "" || pr.MeshToken == "" {
+				return nil, errors.New("配对已批准但返回缺少 mesh url/token")
+			}
+			fmt.Printf("✓ 已批准,正在接入…\n")
+			cr := pr.connectResp
+			return &cr, nil
+		case "denied":
+			return nil, errors.New("配对被拒绝(网页端点了「拒绝」)")
+		case "expired":
+			return nil, errors.New("配对已过期(超时未批准),请重新运行命令")
+		default:
+			return nil, fmt.Errorf("配对返回了未知状态: %q", pr.Status)
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.New("配对超时(本地等待已超过 10 分钟未获批准)")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-t.C:
+		}
+	}
+}
+
+// pairPollOnce 做一次轮询请求并解析。非 200 一律视为致命(403=令牌错、404=未知 id),
+// 直接报错,避免在错误的链接上空转十分钟。pollToken 走 Authorization 头(不进 URL)。
+func pairPollOnce(ctx context.Context, pollURL, pollToken string) (*pairPollResp, error) {
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, pollURL, nil)
+	req.Header.Set("Authorization", "Bearer "+pollToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("轮询配对失败: %w", err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("轮询配对被拒(%d): %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	var pr pairPollResp
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return nil, fmt.Errorf("轮询返回无法解析: %w", err)
+	}
+	return &pr, nil
+}
+
+// openBrowser 尽力打开 url(darwin:open,linux:xdg-open)。任何错误(headless、无桌面、
+// 命令不存在)都静默忽略——链接已显眼打印,用户可手动复制。
+func openBrowser(rawURL string) {
+	var name string
+	switch runtime.GOOS {
+	case "darwin":
+		name = "open"
+	case "linux":
+		name = "xdg-open"
+	default:
+		return
+	}
+	bin, err := exec.LookPath(name)
+	if err != nil {
+		return
+	}
+	_ = exec.Command(bin, rawURL).Start()
 }
 
 // ── tunnel: dial /mesh, keepalive, self-heal ──
@@ -231,6 +479,38 @@ func dialOnce(ctx context.Context, st *State) error {
 }
 
 // ── target parsing ──
+
+// hasCode 判定 target 是否走【既有 code 流程】:剥掉可选的 "scheme://" 前缀、再去掉
+// 首尾多余的 "/" 后,只要 host 之后还跟着非空路径段(即含真正的 "/code"),就是 code
+// 流程;否则(纯 host,如 "cc.hn")走无码配对。注意 "host/"(仅尾斜杠)算纯 host。
+func hasCode(t string) bool {
+	if i := strings.Index(t, "://"); i >= 0 {
+		t = t[i+3:]
+	}
+	slash := strings.Index(t, "/")
+	if slash < 0 {
+		return false
+	}
+	return strings.Trim(t[slash+1:], "/") != ""
+}
+
+// parseHost 解析纯 host 形态的 target(无码配对用),返回 scheme + host。scheme 逻辑与
+// parseTarget 完全一致:显式 "scheme://" 优先,否则 loopback→http、其余→https。尾随的
+// "/" 一并剥除,容忍用户粘贴成 "cc.hn/"。
+func parseHost(t string) (scheme, host string) {
+	explicit := false
+	scheme = "https"
+	if i := strings.Index(t, "://"); i >= 0 {
+		scheme = t[:i]
+		t = t[i+3:]
+		explicit = true
+	}
+	host = strings.Trim(t, "/")
+	if !explicit && isLoopback(host) {
+		scheme = "http"
+	}
+	return scheme, host
+}
 
 func parseTarget(t string) (scheme, host, code string, err error) {
 	explicit := false
