@@ -9,8 +9,9 @@ import { storageKey, getConfig } from './config'
 // 否则回落本文件内既有的通用 select 渲染。分类器与各富组件全是纯展示,点击映射回同一套 helpers
 // (navTo/moveTo/toggleAt/act)发键,无任何 parser/state 改动。
 import { selectKind, type RichSelectHelpers } from './select/selectKind'
+import { RichModelSelect } from './select/RichModelSelect'
 import { useEngineState } from './engine/react'
-import { RichModelSelect as EngineModelSelect } from './engine/states/modelSelect'
+import { EngineControl } from './engine/states'
 import { RichPermissionSelect } from './select/RichPermissionSelect'
 import { RichEffortSelect } from './select/RichEffortSelect'
 import { RichConfirmSelect } from './select/RichConfirmSelect'
@@ -493,9 +494,10 @@ export function ControlBar({
   const attachHot = dragging || (st.kind === 'input' && scanWantsImage(lastAssistantText.split('\n')))
 
   let content: ReactNode
-  if (engineMatch?.kind === 'modelSelect') {
-    // 新引擎接管 /model 选择器:即使旧检测漏判(F1 无字形高亮),新管线照样渲染 + 闭环驱动。
-    content = <EngineModelSelect />
+  if (engineMatch) {
+    // 新读屏引擎命中某个 select 态(注册的全是 select,故非空即 select)→ 渲对应卡片。
+    // 优先于旧 detectState:F1 无字形高亮也能接管。降级(WS 断、无引擎帧)时 engineMatch 为空 → 走下方旧分支。
+    content = <EngineControl />
   } else if (st.kind === 'offline') {
     content = (
       <div className="cbar">
@@ -530,8 +532,8 @@ export function ControlBar({
     // 勾选 ☑、未勾选 ☐(与 AskUserQuestionCard 的 ☑/□ 同族;单选项无复选框)。
     const isMulti = (st.options || []).some((o) => o.checked !== undefined)
     if (kind === 'model') {
-      // 旧卡(模型+力度挤一张)弃用 → 改渲新引擎的两步向导(与上方 engineMatch 分支同一组件)。
-      content = <EngineModelSelect />
+      // 降级兜底(WS 断、无引擎帧):仍用旧卡。实时路径已由上方 engineMatch → EngineControl 接管。
+      content = <RichModelSelect st={st} helpers={helpers} />
     } else if (kind === 'permission') {
       content = <RichPermissionSelect st={st} helpers={helpers} />
     } else if (kind === 'sessionScope') {

@@ -23,11 +23,10 @@ class ModelSelectState extends State<ModelSelectInfo> {
   resolve(ctx: Ctx): ModelSelectInfo | null {
     const opts = ctx.pre.options
     if (opts.length < 2 || !opts.some((o) => familyOf(o.label))) return null
-    const title = titleAbove(ctx)
-    if (!/model|模型/i.test(title)) return null
+    if (!/model|模型/i.test(ctx.pre.title)) return null
     return {
       kind: 'modelSelect',
-      title,
+      title: ctx.pre.title,
       options: opts.map((o) => ({ label: o.label, cur: o.cur, family: familyOf(o.label) })),
       effort: ctx.pre.effort ?? undefined,
     }
@@ -68,16 +67,6 @@ class ModelSelectState extends State<ModelSelectInfo> {
     const m = current()
     return m && m.kind === 'modelSelect' ? (m.info as ModelSelectInfo) : null
   }
-}
-
-function titleAbove(ctx: Ctx): string {
-  const rows = ctx.pre.options.flatMap((o) => o.rows)
-  const top = rows.length ? Math.min(...rows) : ctx.frame.rows
-  for (let y = top - 1; y >= 0 && y >= top - 6; y--) {
-    const t = ctx.frame.text(y).trim()
-    if (t) return t
-  }
-  return ''
 }
 
 export const modelSelect = new ModelSelectState() // 单例,构造即自注册

@@ -53,11 +53,12 @@ export function captureFrame(term: Terminal): Frame {
 }
 
 // ── pre:对帧的一次性特征提取(只放特征,不放结论)。所有 resolve 共读,避免重复运算。──
-export interface PreOption { num: number | null; label: string; rows: number[]; cur: boolean }
-export interface FramePre { options: PreOption[]; footer: string | null; isBusy: boolean; inputBox: boolean; effort: string | null }
+export interface PreOption { num: number | null; label: string; rows: number[]; cur: boolean; checked?: boolean }
+export interface FramePre { options: PreOption[]; footer: string | null; isBusy: boolean; inputBox: boolean; effort: string | null; title: string }
 export interface Ctx { frame: Frame; pre: FramePre }
 
-const RE_OPT = /^\s*(❯|›|>)?\s*(\d+)[.)]\s+(\S.*?)\s*$/
+// g1=游标字形 g2=编号 g3=复选框字形(可空,多选菜单独有) g4=标签
+const RE_OPT = /^\s*(❯|›|>)?\s*(\d+)[.)]\s+([◯◉○●☑■□◻◼]|\[[ xX✔]?\])?\s*(\S.*?)\s*$/
 // 力度行:含 "effort" + 箭头提示 + "adjust"(如 "◉ medium effort  ←/→ to adjust")。捕获力度短语。
 const RE_EFFORT = /(\S[^←<]*?effort[^←<]*?)\s*(?:←|<).*?adjust/i
 
@@ -67,7 +68,9 @@ export function preFrame(frame: Frame): FramePre {
     const m = RE_OPT.exec(frame.text(y))
     if (!m) continue // 先判「像不像选项」,再谈高亮 —— /compact 进度条、力度条不会被误当选项
     const cur = !!m[1] || rowHighlighted(frame.cells[y] || []) // F1:cur = ❯ 字形 或 整行被属性高亮
-    options.push({ num: Number(m[2]), label: m[3], rows: [y], cur })
+    let checked: boolean | undefined
+    if (m[3]) checked = /[◉●☑■◼]|\[[xX✔]\]/.test(m[3]) // 实心/勾=选中,空框=未选;无复选框字形→undefined(单选)
+    options.push({ num: Number(m[2]), label: m[4], rows: [y], cur, checked })
   }
   const tail: string[] = []
   for (let y = Math.max(0, frame.rows - 8); y < frame.rows; y++) tail.push(frame.text(y))
@@ -87,7 +90,19 @@ export function preFrame(frame: Frame): FramePre {
       break
     }
   }
-  return { options, footer, isBusy, inputBox, effort }
+  // 标题:选项块上方最近的非空行(≤6 行内)。各 state 的 resolve 共读,不必各自再找。
+  let title = ''
+  if (options.length) {
+    const top = Math.min(...options.flatMap((o) => o.rows))
+    for (let y = top - 1; y >= 0 && y >= top - 6; y--) {
+      const t = frame.text(y).trim()
+      if (t) {
+        title = t
+        break
+      }
+    }
+  }
+  return { options, footer, isBusy, inputBox, effort, title }
 }
 
 // 行是否被属性高亮:已绘制(非空)单元格里,反显 / 非默认底色占多数 → 高亮。
