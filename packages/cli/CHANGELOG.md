@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.4.5
+
+### Patch Changes
+
+- ccfly install: accept `--system` / flags in any position (a leading flag is no longer mis-parsed as the host), and prompt for the host (default cc.hn) when omitted instead of erroring with `lookup --system: no such host`.
+
 ## 0.4.4
 
 ### Patch Changes

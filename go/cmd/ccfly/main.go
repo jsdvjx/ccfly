@@ -159,16 +159,30 @@ func runInstall(ctx context.Context, args []string) error {
 	claudeDir := fs.String("claude-dir", "", "Claude projects dir (default ~/.claude/projects)")
 	dry := fs.Bool("dry-run", false, "print what would be done; change nothing")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly install <host>[/<code>] [--system] [--claude-dir <dir>] [--dry-run]")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly install [<host>[/<code>]] [--system] [--claude-dir <dir>] [--dry-run]")
 		fs.PrintDefaults()
 	}
-	if len(args) < 1 || args[0] == "" {
-		fs.Usage()
-		return errors.New("missing <host>[/<code>] — 纯 host(如 cc.hn)走无码网页配对,带 /<code> 走连接码")
-	}
-	target := args[0]
-	if err := fs.Parse(args[1:]); err != nil {
+	// flag 可放在 host 前后任意位置:先整体 parse 吃掉 host 前的 flag,取首个位置参数为 host,
+	// 再把 host 之后剩余的二次 parse 吃掉 host 后的 flag —— 修复 `install --system <host>` 把
+	// "--system" 误当 host(于是 POST https://--system/… 报错)的旧 bug。
+	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	target := fs.Arg(0)
+	if extra := fs.Args(); len(extra) > 1 {
+		if err := fs.Parse(extra[1:]); err != nil {
+			return err
+		}
+	}
+	// 没给 host → 交互式问一次(回车默认 cc.hn),不再甩 usage 报错。
+	if target == "" {
+		fmt.Print("ccfly install: 连接到哪个 host?(回车用 cc.hn): ")
+		var line string
+		fmt.Scanln(&line)
+		if line == "" {
+			line = "cc.hn"
+		}
+		target = line
 	}
 
 	// 纯 host(无码)→ 安装前先交互式配对一次(--dry-run 跳过,只展示要写什么)。
