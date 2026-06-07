@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "默认 ccfly 表世界:消费 @ccfly/react,由 ccfly serve 同源托管。",
+  "description": "默认 ccfly 表世界(单台 Node 的网页):消费 @ccfly/react,由 ccfly serve 同源托管。",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",

@@ -20,6 +20,8 @@
 
 It does **not** scrape the screen. It mirrors the *inner world* — the jsonl transcript Claude already writes under `~/.claude`, plus the underlying `tmux` pane — into a *surface world* you can render and control. Detach, lock your phone, walk away, reconnect: the session keeps running in `tmux` and **nothing is lost**.
 
+> One `ccfly serve` is a self-contained **Node** — read and steer the machine it runs on. Run it on many machines and front them with a hub to get **cc.hn** (*Claude Code Hub & Node*): one authenticated Hub gatewaying a mesh of device Nodes. ccfly stays fully usable standalone; the Hub is optional.
+
 ```
 ━━━ inner world ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     Claude Code  ──►  ~/.claude/**.jsonl     transcript · tool calls
@@ -119,7 +121,7 @@ The control service exposes a small, stable HTTP/WS surface. Highlights:
 | **Terminal** | `GET /term` (WebSocket, ttyd-compatible) |
 | **Fallback / health** | `GET /capture` (screen scrape, non-jsonl sessions) · `GET /healthz` |
 
-> 🔐 **Security.** The service performs **no auth of its own** and binds loopback by default — equivalent to the full terminal control a local `tmux` already grants. For any remote exposure, front it with an authenticating reverse proxy / hub (or bind it to a private mesh interface). Never bind `0.0.0.0` on an untrusted network.
+> 🔐 **Security.** The service performs **no auth of its own** and binds loopback by default — equivalent to the full terminal control a local `tmux` already grants. For any remote exposure, front it with an authenticating reverse proxy / hub (such as a **cc.hn** Hub, which gateways each Node over an authenticated WireGuard overlay), or bind it to a private mesh interface. Never bind `0.0.0.0` on an untrusted network.
 
 ## 🗂 Repository layout
 

@@ -2,7 +2,7 @@
   "name": "ccfly-monorepo",
   "version": "0.0.0",
   "private": true,
-  "description": "Transport-agnostic surface-world toolkit for Claude Code sessions.",
+  "description": "ccfly — transport-agnostic surface-world toolkit for Claude Code sessions; the Node half of cc.hn (Claude Code Hub & Node).",
   "license": "MIT",
   "packageManager": "pnpm@9.15.0",
   "engines": {

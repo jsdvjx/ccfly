@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.4.4
+
+### Patch Changes
+
+- Rebuilt screen-state engine: attribute-aware rich-select detection (current row read from reverse-video/bg, not just the ❯ glyph) + closed-loop send/waitFor drive. All rich selects ported (model/permission/effort/confirm/multi/sessionScope/list). cc.hn — Claude Code Hub & Node.
+
 ## 0.3.7
 
 ### Patch Changes
