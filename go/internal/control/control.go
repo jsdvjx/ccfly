@@ -196,11 +196,15 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				continue // 静默跳过越界/不存在路径(纵深防御:决不读未通过 containment 的路径)
 			}
-			if runtime.GOOS == "darwin" {
+			// darwin + 有 GUI 会话:走「剪贴板 + C-v」原生粘贴(干净的 [Image #N]、原生视觉、无需 Read 工具)。
+			// `--system` 守护进程没有 GUI 登录会话的剪贴板(osascript 写的与里世界 Claude 读的不是同一块,
+			// asuser 也注入不进)→ 安装时置 CCFLY_IMAGE_PATHS=1(见 svc.go installDarwin),改走与 Linux
+			// 相同的回退:把图的绝对路径当文本发进去,Claude 用 Read 工具读图(上传落在会话 cwd 内的
+			// .ccfly-uploads/,Read 默认放行、不弹权限)—— 实测可正确读出图片内容。
+			if runtime.GOOS == "darwin" && os.Getenv("CCFLY_IMAGE_PATHS") != "1" {
 				pasteImgs = append(pasteImgs, imgClip{path: real, class: pngfClassForExt(real)})
 			} else {
-				// TODO: linux xclip/wl-copy image clipboard —— 暂无可靠的图片进剪贴板方案,
-				// 故在非 darwin 上回退旧行为:把已校验的绝对路径当文本拼进消息(空格分隔)。
+				// 非 darwin / --system:无可靠图片剪贴板,回退「路径拼进文本」(空格分隔),Claude 读路径取图。
 				fallbackPaths = append(fallbackPaths, real)
 			}
 		}
@@ -351,35 +355,14 @@ func setClipboardImageDarwin(p, class string) error {
 	// 形如:set the clipboard to (read (POSIX file "<quoted-path>") as «class PNGf»)
 	// «» 是 0xC2AB / 0xC2BB(法文角引号),AppleScript 的原始类标识语法;直接写进源串即可。
 	script := "set the clipboard to (read (POSIX file " + appleScriptQuote(p) + ") as «class " + class + "»)"
-	// `--system` 守护进程跑在系统上下文、没有 GUI 登录会话:直跑的 osascript 写的剪贴板,与里世界
-	// Claude(在 tmux 里)读的不是同一块 → C-v 粘不到图(且 osascript 仍退 0、无错可报,极难排查)。
-	// 故优先把 osascript 经 `launchctl asuser <控制台uid>` 注入当前 GUI 登录会话(那块有 pbs 的剪贴板)。
-	// 取不到控制台用户(无人登录)或 asuser 失败 → 回退直跑(交互式 `ccfly serve` 本就在 GUI 会话里,照样可用)。
-	if uid := consoleUID(); uid != "" {
-		if err := exec.Command("launchctl", "asuser", uid, "osascript", "-e", script).Run(); err == nil {
-			return nil
-		}
-	}
+	// 只有「有 GUI 登录会话」的安装才会走到这里(交互式 `ccfly serve` 或用户级 LaunchAgent):
+	// 此时直跑 osascript 写的就是里世界 Claude 读的同一块剪贴板,随后的 C-v 即可粘到图。
+	// `--system` 守护进程没有 GUI 会话剪贴板,改走「路径拼文本」回退(CCFLY_IMAGE_PATHS=1),不会调用本函数。
 	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("osascript: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	return nil
-}
-
-// consoleUID 返回当前 GUI 登录用户的 uid —— /dev/console 的属主(用户登录 GUI 后被 chown 给该用户,
-// 无人登录时属 root=0)。用于把 GUI 类操作(剪贴板)经 `launchctl asuser` 注入其登录会话。
-// 取不到 / 无 GUI 用户(0)→ 返回 ""。仅 darwin 调用(随 setClipboardImageDarwin)。
-func consoleUID() string {
-	out, err := exec.Command("stat", "-f", "%u", "/dev/console").Output()
-	if err != nil {
-		return ""
-	}
-	uid := strings.TrimSpace(string(out))
-	if uid == "" || uid == "0" {
-		return ""
-	}
-	return uid
 }
 
 // appleScriptQuote 把任意字符串安全地转成一个 AppleScript 双引号字符串字面:

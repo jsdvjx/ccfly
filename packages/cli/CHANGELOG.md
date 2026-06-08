@@ -1,5 +1,13 @@
 # ccfly
 
+## 0.4.8
+
+### Patch Changes
+
+- fix(image): `--system` 守护进程改走「图片路径拼文本」回退,绕开它没有的 GUI 会话剪贴板
+
+  `--system`(LaunchDaemon)跑在系统上下文、拿不到 GUI 登录会话的剪贴板,osascript 写的剪贴板与里世界 Claude 读的不是同一块(asuser 也注入不进)→ 截图粘不进消息。改为:安装 `--system` 时在 plist 注入 `CCFLY_IMAGE_PATHS=1`,控制服务据此走与 Linux 相同的回退 —— 把图片绝对路径当文本拼进输入框,Claude 用 Read 工具读图(上传落在会话 cwd 内的 `.ccfly-uploads/`,Read 默认放行、不弹权限,实测可正确读出图片内容)。用户级安装无此 env、仍走剪贴板原生粘贴(干净的 `[Image #N]`)。同时移除上一版失败的 `launchctl asuser` 尝试。
+
 ## 0.4.7
 
 ### Patch Changes
