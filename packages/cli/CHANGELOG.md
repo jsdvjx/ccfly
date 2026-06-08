@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.4.7
+
+### Patch Changes
+
+- Fix native image paste under `ccfly install --system`: the launchd daemon has no GUI session, so its `osascript set the clipboard` didn't reach the tmux Claude (C-v pasted nothing, silently). Route the clipboard set through `launchctl asuser <console-uid>` to inject into the logged-in GUI session.
+
 ## 0.4.6
 
 ### Patch Changes

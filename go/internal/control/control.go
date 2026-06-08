@@ -351,11 +351,35 @@ func setClipboardImageDarwin(p, class string) error {
 	// 形如:set the clipboard to (read (POSIX file "<quoted-path>") as «class PNGf»)
 	// «» 是 0xC2AB / 0xC2BB(法文角引号),AppleScript 的原始类标识语法;直接写进源串即可。
 	script := "set the clipboard to (read (POSIX file " + appleScriptQuote(p) + ") as «class " + class + "»)"
+	// `--system` 守护进程跑在系统上下文、没有 GUI 登录会话:直跑的 osascript 写的剪贴板,与里世界
+	// Claude(在 tmux 里)读的不是同一块 → C-v 粘不到图(且 osascript 仍退 0、无错可报,极难排查)。
+	// 故优先把 osascript 经 `launchctl asuser <控制台uid>` 注入当前 GUI 登录会话(那块有 pbs 的剪贴板)。
+	// 取不到控制台用户(无人登录)或 asuser 失败 → 回退直跑(交互式 `ccfly serve` 本就在 GUI 会话里,照样可用)。
+	if uid := consoleUID(); uid != "" {
+		if err := exec.Command("launchctl", "asuser", uid, "osascript", "-e", script).Run(); err == nil {
+			return nil
+		}
+	}
 	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("osascript: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+// consoleUID 返回当前 GUI 登录用户的 uid —— /dev/console 的属主(用户登录 GUI 后被 chown 给该用户,
+// 无人登录时属 root=0)。用于把 GUI 类操作(剪贴板)经 `launchctl asuser` 注入其登录会话。
+// 取不到 / 无 GUI 用户(0)→ 返回 ""。仅 darwin 调用(随 setClipboardImageDarwin)。
+func consoleUID() string {
+	out, err := exec.Command("stat", "-f", "%u", "/dev/console").Output()
+	if err != nil {
+		return ""
+	}
+	uid := strings.TrimSpace(string(out))
+	if uid == "" || uid == "0" {
+		return ""
+	}
+	return uid
 }
 
 // appleScriptQuote 把任意字符串安全地转成一个 AppleScript 双引号字符串字面:
