@@ -243,6 +243,20 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 	// 「粘进来的图片路径」原生嵌成 `[Image #N]`(不提交、不显路径、不走 Read)。-d 粘完即删该 buffer,
 	// 故所有图复用同一个 buffer 名。多图之间留一小段,确保里世界逐张吃进、序号(#1 #2 …)不串。
 	// 注:imgPaths 均为 validateUploadPath 解出的绝对路径(必以 / 开头),故 set-buffer 直接传、无需 --。
+	//
+	// 里世界把括号粘贴进来的图片路径**异步**嵌成的实时占位串(本机实测 v2.1.168 = `[Image #1]`);
+	// 下面用它作「图已吃进」的就绪信号。注:这是**实时输入框**里的渲染形态,与落盘 transcript 的
+	// `[Image: source: …]` 不同;若某版 Claude 改了这串,轮询数不到 → 落到超时兜底照常发 Enter(优雅降级)。
+	const imgPlaceholder = "[Image #"
+	// 基线-增量(baseline-delta):粘图前先抓一屏、数出当前可见区已有多少个占位(历史/上条消息、
+	// 甚至用户本次文本里若含该串,此刻都已入账),作为基线;粘完只需等到「基线 + 本次张数」,
+	// 绝不把旧占位误算成「已就绪」。仅在确有图要粘时抓 —— 纯文本提交零额外开销。
+	imgBaseline := 0
+	if len(imgPaths) > 0 {
+		if out, err := exec.Command("tmux", "capture-pane", "-t", sess, "-p").CombinedOutput(); err == nil {
+			imgBaseline = strings.Count(string(out), imgPlaceholder)
+		}
+	}
 	for i, p := range imgPaths {
 		if out, err := exec.Command("tmux", "set-buffer", "-b", "ccfly-img", p).CombinedOutput(); err != nil {
 			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
@@ -254,6 +268,32 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		if i < len(imgPaths)-1 {
 			time.Sleep(120 * time.Millisecond) // 多图间隔:让里世界逐张吃进、`[Image #N]` 序号不串
+		}
+	}
+
+	// ── 关键修复(图片不发送的根因):粘完最后一张图后、发 Enter 之前,确定性地等到「图都吃进去了」──。
+	// `paste-buffer -p` 是括号粘贴(ESC[200~…ESC[201~),里世界把粘进的路径**异步**嵌成 `[Image #N]`
+	// (要识别成图片文件、登记附件、分配 #N、重渲输入行)。若紧贴最后一张 paste 就发 Enter,那个 \r 落在
+	// 这段异步「粘贴处理」窗口里被吞掉而**不提交** —— 正是「框里有字+[Image #N] 却发不出去」的根因
+	// (无图时走 send-keys -l 字面打字、无异步粘贴态,Enter 即刻提交、一直正常)。旧代码的 120ms 仅在
+	// 「多图之间」生效(if i<len-1),**最后一张到 Enter 之间零间隔**,故偏偏漏掉它。
+	//
+	// 用 capture-pane 轮询替代盲睡:**先抓一次**(快路径:若已渲好立即收手发 Enter,近乎零额外延迟),
+	// 数 `[Image #` 到达「基线 + 本次张数」即就绪;否则睡 200ms 再抓,最多 8 次(≈1.4s 兜底)。
+	// 只信硬阈值 n>=want(刻意不做「连续两次相同即就绪」的提前收手——那会在多图增量渲染的间歇里误判、
+	// 把 Enter 又抢在最后一张渲完前发出,等于重新引入本 bug)。超时也照常发 Enter,绝不挂起(优雅降级)。
+	// 纯文本提交(len(imgPaths)==0)整段跳过,零额外延迟。
+	if len(imgPaths) > 0 {
+		want := imgBaseline + len(imgPaths)
+		for poll := 0; poll < 8; poll++ {
+			out, err := exec.Command("tmux", "capture-pane", "-t", sess, "-p").CombinedOutput()
+			if err != nil {
+				break // 抓屏失败(pane 没了等)→ 不死等,落下面照常发 Enter
+			}
+			if strings.Count(string(out), imgPlaceholder) >= want {
+				break // 本次的图都已渲成 [Image #N] → 吃进完毕,立刻发 Enter
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
 	}
 

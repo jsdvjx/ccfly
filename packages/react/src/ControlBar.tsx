@@ -243,6 +243,9 @@ export function ControlBar({
   // submit 发出(textarea 成为唯一缓冲),不再有「建议→并行直发」这条绕过漏斗的旁路(S3/S4)。
   const [intCfm, setIntCfm] = useState(false) // 中断确认:true=弹自绘 confirm(防误触打断 Claude)
   const [ultraArm, setUltraArm] = useState(false) // 长按已触发 ultracode(发送键变色 + 冒提示)
+  // 按下态:由 pointerdown/up 直接驱动(不靠移动端时灵时不灵的 :active),按下那一刻必定缩放+提亮 ——
+  // 直接解决「按下后不确定有没有按到」。
+  const [pressed, setPressed] = useState(false)
   // 提交在飞标记:submit 把 donePaths 快照并进 act 那一刻 → 直到响应落定都为真。
   // 期间冻结附件改动(add/remove/retry)+ 禁发,杜绝「提交进行中改了附件集,导致已快照的路径与
   // 实际不符 / 新增项被随后的 reset 丢弃」的竞态(评审点名的 ATTACHMENT SUBMISSION RACE)。
@@ -408,28 +411,44 @@ export function ControlBar({
   // 一律委派给唯一漏斗 submit —— 由它统一过 certain 闸 + 原子清空 + 成功才清草稿 + 409 保留草稿。
   const sendText = (ultra: boolean) => {
     const t = text.trim()
+    // 图片仍在上传:整体等待,绝不只发文本把图漏掉(过去靠 disabled 静默拦,现在显式冒因)。
+    if (attachments.anyUploading) {
+      flash('图片上传中,请稍候…')
+      return
+    }
     // 允许「纯发图」:无文本但有已上传附件时也放行(submit 会把路径并进提交);两者都空才不发。
-    if (!t && attachments.donePaths.length === 0) return
+    if (!t && attachments.donePaths.length === 0) {
+      // 不再静默:带了图却没就绪(失败/被移除)时把原因冒出来,免得「按了没反应」像发送坏了。
+      if (attachments.items.length) flash('图片未就绪,点缩略图重试')
+      return
+    }
     // ultracode 只在有文本时追加(纯发图不挂 ultracode 关键词)。
     submit(ultra && t ? t + ' ultracode' : t)
   }
   const send = () => sendText(false)
 
-  // ── 长按发送:pointerdown 起计时,≥400ms 触发 ultracode 发送;pointerup 若已触发则不再普通发送(无双发)。
+  // ── 长按发送:pointerdown 即给按下态(is-pressed,即时反馈);≥400ms 触发强发
+  //    (有文本→尾部追加 ultracode;纯图→普通发图)。pointerup 若长按已发则不再普通发送(无双发)。
   const onSendDown = () => {
     longFired.current = false
+    setPressed(true) // 按下那一刻立即变形/变亮 —— 解决「不确定有没有按到」
     clearTimeout(pressTimer.current)
     pressTimer.current = window.setTimeout(() => {
-      longFired.current = true
-      if (text.trim()) {
-        setUltraArm(true) // 按钮变色 + 冒「+ultracode」提示
+      const t = text.trim()
+      const hasImg = attachments.donePaths.length > 0
+      if (!t && !hasImg) return // 没东西可发:不标记 longFired,留给 pointerup 的 send()(那里会按需冒因)
+      longFired.current = true // 长按已发 → 抑制 pointerup 的普通发送
+      if (t) {
+        setUltraArm(true) // 有文本:按钮变色 + 冒「+ultracode」提示
         sendText(true)
-        // 短暂保留高亮态,松手后渐隐。
-        window.setTimeout(() => setUltraArm(false), 700)
+        window.setTimeout(() => setUltraArm(false), 700) // 短暂保留高亮态,松手后渐隐
+      } else {
+        sendText(false) // 纯发图:ultracode 关键词只对文本有意义 → 直接普通发图(修「长按图片不发」)
       }
     }, LONGPRESS_MS)
   }
   const onSendUp = () => {
+    setPressed(false)
     clearTimeout(pressTimer.current)
     if (longFired.current) {
       longFired.current = false
@@ -438,7 +457,8 @@ export function ControlBar({
     send() // 轻点 = 普通发送
   }
   const onSendLeave = () => {
-    // 指针滑出按钮:取消未触发的长按(避免误判),不发送。
+    // 指针滑出/取消:收起按下态 + 撤未触发的长按(避免误判),不发送。
+    setPressed(false)
     clearTimeout(pressTimer.current)
   }
 
@@ -687,11 +707,12 @@ export function ControlBar({
               }}
             />
           </div>
-          {/* 发送(与附件同处 compose 行):轻点=普通发送;长按≈400ms=尾部追加 ultracode 强发。
-              disabled 绑发送闸(canSend);submit funnel 内部仍会再判一次,双保险。 */}
+          {/* 发送(与附件同处 compose 行):轻点=普通发送;长按≈400ms=有文本则追加 ultracode 强发、纯图则发图。
+              不再用 disabled 硬拦(那会「按了毫无反应」且无从解释):改为始终可点 + 不可发态变暗(is-off),
+              点了由 sendText/submit 漏斗按真实原因冒提示(上传中/设备忙/未就绪)。按下即 is-pressed 给即时反馈。 */}
           <button
-            className={'cbtn primary send-btn' + (ultraArm ? ' ultra' : '')}
-            disabled={!canSend}
+            className={'cbtn primary send-btn' + (ultraArm ? ' ultra' : '') + (pressed ? ' is-pressed' : '') + (canSend ? '' : ' is-off')}
+            aria-disabled={!canSend}
             onPointerDown={onSendDown}
             onPointerUp={onSendUp}
             onPointerLeave={onSendLeave}

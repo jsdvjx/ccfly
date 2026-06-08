@@ -339,7 +339,7 @@ pre.code { background: #0c0e13; padding: 10px 12px; }
    touch-action/user-select/touch-callout 一并关掉:防 iOS 长按弹选择/放大镜/callout,
    那会发 pointercancel 把长按(+ultracode)判定打断。 */
 .send-btn {
-  transition: background 0.18s, color 0.18s, transform 0.12s;
+  transition: background 0.18s, color 0.18s, transform 0.1s, filter 0.12s, opacity 0.12s;
   touch-action: manipulation;
   user-select: none;
   -webkit-user-select: none;
@@ -352,6 +352,12 @@ pre.code { background: #0c0e13; padding: 10px 12px; }
   animation: ultra-pop 0.3s ease;
 }
 @keyframes ultra-pop { 0% { transform: scale(0.92); } 60% { transform: scale(1.1); } 100% { transform: scale(1.04); } }
+/* 按下即时反馈:由 JS pointer 事件加 .is-pressed(不靠移动端时灵时不灵的 :active)。按下那一刻必定
+   缩放+提亮,用户一定「感到按到了」。放在 .ultra 之后,长按强发时也优先显示按下态。 */
+.send-btn.is-pressed { transform: scale(0.93); filter: brightness(1.14); }
+/* 不可发态(未就绪 / 图片上传中):明显变暗,「能不能发」一眼可见;仍可点 —— 点了由漏斗冒原因提示。 */
+.send-btn.is-off { opacity: 0.42; filter: saturate(0.5) brightness(0.92); }
+.send-btn.is-off.is-pressed { transform: scale(0.97); filter: saturate(0.5) brightness(1.04); } /* 不可发态按下也给点反馈,克制些 */
 .cbtn {
   flex: none; min-height: 46px; padding: 0 16px; font: 600 15px system-ui; color: var(--fg);
   background: #272c36; border: 1px solid var(--bd); border-radius: 10px; cursor: pointer;
