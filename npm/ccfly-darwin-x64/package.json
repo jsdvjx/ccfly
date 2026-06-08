@@ -1,6 +1,6 @@
 {
   "name": "ccfly-darwin-x64",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "Prebuilt ccfly Go binary for darwin/x64 (Intel macOS).",
   "license": "MIT",
   "os": [
