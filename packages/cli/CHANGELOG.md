@@ -1,5 +1,15 @@
 # ccfly
 
+## 0.4.9
+
+### Patch Changes
+
+- fix(image): 改用「括号粘贴路径」原生附图,全平台统一(含 --system),替掉剪贴板/路径拼文本
+
+  附图改走终端「拖拽文件」的底层机制:tmux `set-buffer` + `paste-buffer -p`(括号粘贴)把上传图的绝对路径粘进里世界输入框,Claude 原生嵌成 `[Image #N]`。纯 tmux 往 PTY 注字节、与 GUI/剪贴板无关 → `--system` / headless 一样能用,不再需要 0.4.8 的 `CCFLY_IMAGE_PATHS` 路径拼文本特判,也移除了 darwin 的 osascript 剪贴板通道(连同 `imgClip`/`pngfClassForExt`/`appleScriptQuote`)。
+
+  实测(v2.1.168):文本 + 多图 → `[Image #1] [Image #2]` 原生嵌入、序号正确、buffer 不残留(`-d`),Claude 正确读出两张。优雅降级:万一某版 Claude 不再自动嵌图,路径就当文本落框 → 提交后 Claude 仍会 `Read` 取图。
+
 ## 0.4.8
 
 ### Patch Changes

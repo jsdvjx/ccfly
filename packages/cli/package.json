@@ -1,6 +1,6 @@
 {
   "name": "ccfly",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Local Go control service for Claude Code sessions (reads ~/.claude jsonl + drives tmux).",
   "license": "MIT",
   "type": "commonjs",
@@ -43,10 +43,10 @@
   "comment:platform": "The main package intentionally constrains os/cpu only loosely; the bin shim does the real platform check and resolves the matching ccfly-<os>-<arch> optionalDependency at runtime.",
   "comment:optionalDependencies": "Per-platform prebuilt binary subpackages. Exactly one installs based on the consumer's os/cpu (npm honors each subpackage's own os/cpu fields). Versions are pinned in lockstep with this package and bumped together by CI/changesets. bin/ccfly.js resolves the matching package at runtime.",
   "optionalDependencies": {
-    "ccfly-darwin-arm64": "0.4.8",
-    "ccfly-darwin-x64": "0.4.8",
-    "ccfly-linux-arm64": "0.4.8",
-    "ccfly-linux-x64": "0.4.8"
+    "ccfly-darwin-arm64": "0.4.9",
+    "ccfly-darwin-x64": "0.4.9",
+    "ccfly-linux-arm64": "0.4.9",
+    "ccfly-linux-x64": "0.4.9"
   },
   "author": "ccfly",
   "homepage": "https://github.com/jsdvjx/ccfly#readme",

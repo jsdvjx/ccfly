@@ -192,14 +192,11 @@ func installDarwin(o Options) error {
 	claude := claudeDirOf(o, home)
 	logPath := filepath.Join(home, ".ccfly", "ccfly.log")
 
-	var binPath, plistPath, userElem, imgPathEnv string
+	var binPath, plistPath, userElem string
 	if o.System {
 		binPath = "/usr/local/bin/ccfly"
 		plistPath = "/Library/LaunchDaemons/" + darwinLabel + ".plist"
 		userElem = "  <key>UserName</key><string>" + name + "</string>\n"
-		// --system 跑在系统上下文、没有 GUI 登录会话的剪贴板 → 让控制服务改走「图片路径拼文本」回退
-		// (里世界 Claude 用 Read 工具读图),而非粘不进图的 osascript 剪贴板。用户级安装无此 env、照用剪贴板。
-		imgPathEnv = "<key>CCFLY_IMAGE_PATHS</key><string>1</string>"
 	} else {
 		binPath = filepath.Join(home, ".ccfly", "bin", "ccfly")
 		plistPath = filepath.Join(home, "Library", "LaunchAgents", darwinLabel+".plist")
@@ -216,14 +213,14 @@ func installDarwin(o Options) error {
     <string>--claude-dir</string>
     <string>%s</string>
   </array>
-  <key>EnvironmentVariables</key><dict><key>HOME</key><string>%s</string><key>PATH</key><string>%s</string>%s</dict>
+  <key>EnvironmentVariables</key><dict><key>HOME</key><string>%s</string><key>PATH</key><string>%s</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
-`, darwinLabel, userElem, binPath, o.Target, claude, home, svcPATH, imgPathEnv, logPath, logPath)
+`, darwinLabel, userElem, binPath, o.Target, claude, home, svcPATH, logPath, logPath)
 
 	if o.DryRun {
 		fmt.Printf("# bin   -> %s (copy of %s)\n# plist -> %s\n# run as %s, HOME=%s\n\n%s", binPath, self, plistPath, name, home, plist)

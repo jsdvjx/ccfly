@@ -42,7 +42,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -133,15 +132,15 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		// (web/TUI 输入框状态分裂的整类 bug 之根因 A)。raw keys(菜单方向键/Space/Esc)与
 		// 纯打字不带 Clear,故菜单导航/中断完全不受影响。
 		Clear bool `json:"clear"`
-		// Images:本次提交要「原生粘贴」进里世界输入框的、已落盘上传图片的**绝对路径**列表
+		// Images:本次提交要「原生附图」进里世界输入框的、已落盘上传图片的**绝对路径**列表
 		// (前端先经 /upload 落盘到会话 cwd 的 .ccfly-uploads/,再把返回的绝对路径填这里)。
 		//
-		// 为什么不再像旧版那样把路径当文本拼进消息:把 "/abs/path.png" 当字面文本打进去,里世界
-		// Claude 只是「看到一条含路径的文字」,并不一定把它当图读;而真正的 Claude Code 体验是
-		// **粘贴图片 → 输入框里出现 `[Image #N]` 占位**(原生嵌图、随消息一起带上、不提交不显路径)。
-		// 经本机实测,这一原生嵌图可被复刻:把目标图片塞进**系统剪贴板**,再向 tmux 会话发一次
-		// `C-v`,里世界即吐出 `[Image #N]`(详见 handleSendKeys 的原子提交分支)。故 Images 走的是
-		// 「设置 OS 剪贴板 → C-v」这条原生粘贴通道,而非文本拼接。仅在原子提交(Clear+Enter)时消费。
+		// 真正的 Claude Code 体验是 **附图 → 输入框里出现 `[Image #N]` 占位**(原生嵌图、随消息一起带上、
+		// 不提交不显路径)。复刻它**不靠系统剪贴板**(那要 GUI 登录会话,--system 守护进程拿不到),而靠
+		// 「**括号粘贴(bracketed paste)其绝对路径**」—— 即终端「拖拽文件」的底层机制:tmux `set-buffer`
+		// 把路径塞进 buffer、`paste-buffer -p`(带括号)粘进输入框,里世界一见是「粘进来的图片路径」就
+		// 原生嵌成 `[Image #N]`(详见 handleSendKeys 的原子提交分支)。纯 tmux 往 PTY 注字节、与 GUI 无关,
+		// 故 --system / headless 一样能用。仅在原子提交(Clear+Enter)时消费。
 		Images []string `json:"images"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -182,46 +181,37 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 	// 合法图片路径:仅在原子提交分支、且 darwin 上才走「剪贴板 + C-v」原生粘贴通道(见下)。
 	// 每条都先过 containment 终检(只允许会话 .ccfly-uploads/ 内的已上传文件),逐个解析其剪贴板类。
 	// 非 darwin 没有可靠的「图片进剪贴板」方案 → 这些路径回退旧行为:把绝对路径当文本拼进消息(见 textPayload)。
-	var pasteImgs []imgClip // darwin:要 设置剪贴板→C-v 的图片(已过 containment)
-	var fallbackPaths []string // 非 darwin:回退「路径拼进文本」的图片
+	// 图片原生附图:把每张已过 containment 的上传图,以「括号粘贴(bracketed paste)其绝对路径」
+	// 的方式注入里世界输入框 —— 这正是终端「拖拽文件」的底层机制。里世界 Claude Code 一旦收到
+	// 「粘进来的图片文件路径」,就原生嵌成 [Image #N](干净占位、随消息带上、不显路径、不走 Read)。
+	// 经本机实测(v2.1.168):tmux `paste-buffer -p`(带括号)送路径 → 输入框直接出 [Image #1]。
+	//
+	// 为何不再用「osascript 剪贴板 + C-v」:那依赖 GUI 登录会话的剪贴板,--system 守护进程拿不到;
+	// 而括号粘贴是纯 tmux 往 PTY 注字节、与 GUI/剪贴板无关 → --system / headless 一样能用,全平台统一。
+	// 优雅降级:万一某版 Claude 不再自动嵌图,路径就当文本落在框里 → 提交后 Claude 仍会 Read 它取图。
+	var imgPaths []string // 已过 containment 的真实绝对路径,逐张括号粘贴
 	if atomicSubmit && len(req.Images) > 0 {
 		// containment 复用:uploadDirForSession 解析出的目录,与 upload.go 落盘口径**完全一致**
 		// (resolveSessionParam 扛 /clear → 反查 sid → sidCwd 取冻结 cwd → <cwd>/.ccfly-uploads/,
-		//  兜底 ~/.ccfly/uploads/)。validateUploadPath 再用与 upload.go 同款的
-		// EvalSymlinks(dir)+filepath.Rel 终检,确保每条 Images 路径真落在该目录之内 ——
-		// 绝不 osascript 读任意路径(否则等于把「读任意本机文件进剪贴板」的能力开给不可信前端)。
+		//  兜底 ~/.ccfly/uploads/)。validateUploadPath 再用与 upload.go 同款的 EvalSymlinks(dir)+
+		// filepath.Rel 终检,确保每条 Images 路径真落在该目录之内 —— 绝不把任意本机路径粘给里世界。
 		dir := uploadDirForSession(req.Session)
 		for _, p := range req.Images {
-			real, ok := validateUploadPath(dir, p)
-			if !ok {
-				continue // 静默跳过越界/不存在路径(纵深防御:决不读未通过 containment 的路径)
+			if real, ok := validateUploadPath(dir, p); ok {
+				imgPaths = append(imgPaths, real)
 			}
-			// darwin + 有 GUI 会话:走「剪贴板 + C-v」原生粘贴(干净的 [Image #N]、原生视觉、无需 Read 工具)。
-			// `--system` 守护进程没有 GUI 登录会话的剪贴板(osascript 写的与里世界 Claude 读的不是同一块,
-			// asuser 也注入不进)→ 安装时置 CCFLY_IMAGE_PATHS=1(见 svc.go installDarwin),改走与 Linux
-			// 相同的回退:把图的绝对路径当文本发进去,Claude 用 Read 工具读图(上传落在会话 cwd 内的
-			// .ccfly-uploads/,Read 默认放行、不弹权限)—— 实测可正确读出图片内容。
-			if runtime.GOOS == "darwin" && os.Getenv("CCFLY_IMAGE_PATHS") != "1" {
-				pasteImgs = append(pasteImgs, imgClip{path: real, class: pngfClassForExt(real)})
-			} else {
-				// 非 darwin / --system:无可靠图片剪贴板,回退「路径拼进文本」(空格分隔),Claude 读路径取图。
-				fallbackPaths = append(fallbackPaths, real)
-			}
+			// 越界/不存在路径静默跳过(纵深防御:决不粘未通过 containment 的路径)。
 		}
 	}
 
-	// textPayload:真正要 `send-keys -l --` 打进去的字面文本。darwin 走原生粘贴(图不进文本);
-	// 非 darwin 回退时,把 fallbackPaths 以空格接在用户文本之后(与旧版一致:全程单行、无换行字节)。
+	// textPayload:真正要 `send-keys -l --` 打进去的字面文本(纯用户文本;图片不进文本、走括号粘贴)。
 	textPayload := req.Text
-	if len(fallbackPaths) > 0 {
-		textPayload = strings.TrimSpace(strings.Join(append([]string{req.Text}, fallbackPaths...), " "))
-	}
 
 	var cmds [][]string
 	// CLEAR PRIMITIVE(根因 A):提交前先硬清空里世界当前输入行,再打字。
 	// 用 `C-a C-k`(行首 + 杀到行尾)而非单个 C-u —— C-u 在部分 readline 模式下只杀「光标→行首」,
 	// C-a 先把光标移到行首、C-k 再杀到行尾,无论光标在哪都确定性清空整行;空行上是安全 no-op、幂等。
-	// 落键顺序变为:[C-a C-k] → [-l -- text] →(各图 剪贴板+C-v)→ [Enter]:打字前行空、Enter 后行被消费,拼接结构上不可能。
+	// 落键顺序变为:[C-a C-k] → [-l -- text] →(各图 括号粘贴其路径 → [Image #N])→ [Enter]:打字前行空、Enter 后行被消费,拼接结构上不可能。
 	// 仅在提交分支(已被上面 server floor 过闸)生效;放在字面文本命令之前 PREPEND。
 	if atomicSubmit {
 		cmds = append(cmds, []string{"send-keys", "-t", sess, "C-a", "C-k"})
@@ -237,7 +227,7 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		cmds = append(cmds, args)
 	}
 	// 先把「clear + 打字 + 具名键」这批确定性 tmux 命令依次发出(图片粘贴在它们之后、Enter 之前)。
-	if len(cmds) == 0 && len(pasteImgs) == 0 && !req.Enter {
+	if len(cmds) == 0 && len(imgPaths) == 0 && !req.Enter {
 		ctrlErr(w, 400, "nothing to send")
 		return
 	}
@@ -248,33 +238,30 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// ── 图片原生粘贴(darwin)──:对每张已过 containment 的图,先把它塞进系统剪贴板,再发一次 C-v。
-	// 里世界 Claude Code 收到 C-v 时从剪贴板取图,在输入框就地吐出 `[Image #N]` 占位(原生嵌图,
-	// 不提交、不显路径)—— 这正是「真实粘贴图片」的体验,经本机实测可复刻(见 Images 字段注释)。
-	// 时序:osascript 设剪贴板与 C-v 之间留 ~150ms 让剪贴板写入落定(否则 C-v 可能取到上一张/空),
-	// 多图之间也留一小段,确保里世界逐张吃进、序号(#1 #2 …)不串。
-	for i, im := range pasteImgs {
-		if err := setClipboardImageDarwin(im.path, im.class); err != nil {
-			// 单张设剪贴板失败不毁整条提交:跳过这张,继续其余(已打的文本/已粘的图仍在框里)。
-			log.Printf("ccfly control: set clipboard for %s failed: %v (skip this image)", im.path, err)
-			continue
-		}
-		time.Sleep(150 * time.Millisecond) // 剪贴板写入落定窗口
-		if out, err := exec.Command("tmux", "send-keys", "-t", sess, "C-v").CombinedOutput(); err != nil {
+	// ── 图片原生附图:逐张「括号粘贴其绝对路径」──。对每张图:tmux set-buffer 把路径塞进一个具名
+	// buffer,再 paste-buffer -p(-p=括号粘贴,模拟拖拽)把它粘进里世界输入框;里世界即把这条
+	// 「粘进来的图片路径」原生嵌成 `[Image #N]`(不提交、不显路径、不走 Read)。-d 粘完即删该 buffer,
+	// 故所有图复用同一个 buffer 名。多图之间留一小段,确保里世界逐张吃进、序号(#1 #2 …)不串。
+	// 注:imgPaths 均为 validateUploadPath 解出的绝对路径(必以 / 开头),故 set-buffer 直接传、无需 --。
+	for i, p := range imgPaths {
+		if out, err := exec.Command("tmux", "set-buffer", "-b", "ccfly-img", p).CombinedOutput(); err != nil {
 			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
 			return
 		}
-		if i < len(pasteImgs)-1 {
-			time.Sleep(150 * time.Millisecond) // 多图间隔:让里世界逐张吃进、`[Image #N]` 序号不串
+		if out, err := exec.Command("tmux", "paste-buffer", "-p", "-d", "-b", "ccfly-img", "-t", sess).CombinedOutput(); err != nil {
+			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
+			return
+		}
+		if i < len(imgPaths)-1 {
+			time.Sleep(120 * time.Millisecond) // 多图间隔:让里世界逐张吃进、`[Image #N]` 序号不串
 		}
 	}
 
 	// 最后整体提交:Enter 是独立按键事件(非粘贴),里世界把「文本 + 各 [Image #N]」作一条消息发出。
-	// 防空提交护栏:仅当是「纯发图」原子提交(无文本、无回退路径)且最终一张图都没真粘进去
-	//   (全部图片未过 containment / 设剪贴板失败)时,框里其实空空如也 —— 此刻发 Enter 会提交一条
-	//   空消息(打扰里世界)。故此情形下吞掉 Enter,返回 ok:false 让前端知道「图片未粘成、未提交」。
-	//   其余情形(有文本 / 至少粘进一张图 / 普通非提交回车)照常发 Enter。
-	if req.Enter && atomicSubmit && textPayload == "" && len(pasteImgs) == 0 {
+	// 防空提交护栏:仅当是「纯发图」原子提交(无文本)且一张图都没过 containment(imgPaths 为空)时,
+	//   框里空空如也 —— 此刻发 Enter 会提交一条空消息(打扰里世界)。故此情形吞掉 Enter,返回 ok:false。
+	//   其余情形(有文本 / 至少粘了一张图的路径)照常发 Enter。
+	if req.Enter && atomicSubmit && textPayload == "" && len(imgPaths) == 0 {
 		ctrlJSON(w, 200, map[string]any{"ok": false, "kind": "input", "reason": "no image pasted"})
 		return
 	}
@@ -285,12 +272,6 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	ctrlJSON(w, 200, map[string]any{"ok": true})
-}
-
-// imgClip 描述一张待原生粘贴的图片:已过 containment 的真实路径 + 其 AppleScript 剪贴板类(«class …»)。
-type imgClip struct {
-	path  string // EvalSymlinks 解析后的真实绝对路径(已确认落在会话 .ccfly-uploads/ 内)
-	class string // PNGf / JPEG / GIFf / TIFF(按扩展名选,见 pngfClassForExt)
 }
 
 // validateUploadPath 对一条客户端给的图片路径做与 upload.go **同款**的 containment 终检:
@@ -324,54 +305,6 @@ func validateUploadPath(dir, p string) (string, bool) {
 		return "", false // 越界:不在 .ccfly-uploads/ 之内
 	}
 	return cleanFile, true
-}
-
-// pngfClassForExt 按扩展名选 AppleScript 剪贴板图片类(«class …»)。剪贴板里的「图片数据」
-// 需带正确的类型标识里世界才认得;未知扩展默认按 PNGf(最常见、上传截图多为 png)。
-func pngfClassForExt(p string) string {
-	switch strings.ToLower(filepath.Ext(p)) {
-	case ".png":
-		return "PNGf"
-	case ".jpg", ".jpeg":
-		return "JPEG"
-	case ".gif":
-		return "GIFf"
-	case ".tif", ".tiff":
-		return "TIFF"
-	default:
-		return "PNGf"
-	}
-}
-
-// setClipboardImageDarwin 在 macOS 上把一张图片文件读进系统剪贴板(供随后的 C-v 原生粘贴)。
-// 实现:osascript 跑一句 AppleScript —— `set the clipboard to (read (POSIX file "<p>") as «class PNGf»)`。
-//
-// 注入安全(关键):path 来自不可信前端,绝不能拼进 shell(已用 exec.Command 传参、无 shell),
-// 但它会进入 AppleScript 源串,故必须对 AppleScript 字符串字面做正确转义 —— 见 appleScriptQuote:
-// 把反斜杠与双引号转义后用双引号包起来,这样含空格/引号/反斜杠的路径也不会越出字符串字面、
-// 更不可能注入 AppleScript 语句。class(PNGf/JPEG/…)来自我们自己的白名单(pngfClassForExt),非客户端可控。
-// osascript 退出非 0(读图失败/类型不符)→ 返回 err,调用方据此跳过该图、不发 C-v。
-func setClipboardImageDarwin(p, class string) error {
-	// 形如:set the clipboard to (read (POSIX file "<quoted-path>") as «class PNGf»)
-	// «» 是 0xC2AB / 0xC2BB(法文角引号),AppleScript 的原始类标识语法;直接写进源串即可。
-	script := "set the clipboard to (read (POSIX file " + appleScriptQuote(p) + ") as «class " + class + "»)"
-	// 只有「有 GUI 登录会话」的安装才会走到这里(交互式 `ccfly serve` 或用户级 LaunchAgent):
-	// 此时直跑 osascript 写的就是里世界 Claude 读的同一块剪贴板,随后的 C-v 即可粘到图。
-	// `--system` 守护进程没有 GUI 会话剪贴板,改走「路径拼文本」回退(CCFLY_IMAGE_PATHS=1),不会调用本函数。
-	out, err := exec.Command("osascript", "-e", script).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("osascript: %s (%w)", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-// appleScriptQuote 把任意字符串安全地转成一个 AppleScript 双引号字符串字面:
-// 反斜杠 \ → \\,双引号 " → \",再两端包双引号。这样不可信路径无论含什么字符,都被关在字符串
-// 字面里,既不会提前闭合字符串、也无从拼出可执行的 AppleScript 语句(切断 osascript 注入面)。
-func appleScriptQuote(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	return `"` + s + `"`
 }
 
 func handleCapture(w http.ResponseWriter, r *http.Request) {
