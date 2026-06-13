@@ -2,13 +2,34 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- interactive-widget:Android Chrome 弹键盘时收缩布局视口(iOS 忽略,走 visualViewport JS 兜底) -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="color-scheme" content="dark" />
-    <title>ccfly · cc.hn Node</title>
-    <script type="module" crossorigin src="./assets/index-RD6opxty.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-D-22SqHo.css">
+    <meta name="theme-color" content="#0c0e13" />
+    <title>ccfly · cc.hn — Claude Code Hub</title>
+    <!-- PWA:可安装 + 图标 + iOS 全屏(资源在 public/,节点与 Hub 两处 embed 共用) -->
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <!-- 终端 Nerd Font:提前拉取,xterm 一挂载就能用正确字形/格宽 -->
+    <link
+      rel="preload"
+      href="/fonts/JetBrainsMonoNerdFontMono-Regular.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="ccfly" />
+    <script type="module" crossorigin src="/assets/index-DGVSNA6j.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-BdkHiB8E.css">
   </head>
   <body>
-    <div id="root"></div>
+    <div id="app"></div>
   </body>
 </html>
