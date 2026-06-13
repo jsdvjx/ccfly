@@ -27,6 +27,9 @@ func clausePane(name, cwd, curCmd string) tmuxPane {
 	return tmuxPane{Name: name, Cwd: cwd, CurCmd: curCmd}
 }
 
+// noOwn:无真值表(hook 未覆盖)的空 ownership——存量行为的回归用例都用它。
+func noOwn() paneOwnership { return ownershipFor(nil, nil) }
+
 // TestResolveClearRebinding 核心:/clear 后新 id 解析到陈旧名的真 pane,旧 id 不再 live。
 func TestResolveClearRebinding(t *testing.T) {
 	cwd := "/Users/u/proj"
@@ -40,11 +43,11 @@ func TestResolveClearRebinding(t *testing.T) {
 	}
 
 	// 新 id 应解析到陈旧名的真 pane(否则 attach 会新开孤儿)。
-	if got := resolveTmuxName(sidNew, panes, snaps); got != defaultTmuxName(sidOld) {
+	if got := resolveTmuxName(sidNew, panes, snaps, noOwn()); got != defaultTmuxName(sidOld) {
 		t.Fatalf("/clear 后新 id 应解析到旧名真 pane %q,得 %q", defaultTmuxName(sidOld), got)
 	}
 
-	live := liveSessionIDs(panes, snaps)
+	live := liveSessionIDs(panes, snaps, noOwn())
 	if !live[sidNew] {
 		t.Fatalf("当前(新)会话应 live=true")
 	}
@@ -59,10 +62,10 @@ func TestResolveNormalNoClear(t *testing.T) {
 	snaps := []claudeSnapshot{snap(sidLoc, cwd, "2026-06-06T11:00:00Z")}
 	panes := []tmuxPane{clausePane(defaultTmuxName(sidLoc), cwd, "2.1.167")}
 
-	if got := resolveTmuxName(sidLoc, panes, snaps); got != defaultTmuxName(sidLoc) {
+	if got := resolveTmuxName(sidLoc, panes, snaps, noOwn()); got != defaultTmuxName(sidLoc) {
 		t.Fatalf("常态应用本名 %q,得 %q", defaultTmuxName(sidLoc), got)
 	}
-	if live := liveSessionIDs(panes, snaps); !live[sidLoc] {
+	if live := liveSessionIDs(panes, snaps, noOwn()); !live[sidLoc] {
 		t.Fatalf("常态精确同名在跑应 live=true")
 	}
 }
@@ -73,10 +76,10 @@ func TestResolveOfflineNoPane(t *testing.T) {
 	snaps := []claudeSnapshot{snap(sidOld, cwd, "2026-06-06T09:00:00Z")}
 	var panes []tmuxPane // tmux 全无
 
-	if got := resolveTmuxName(sidOld, panes, snaps); got != defaultTmuxName(sidOld) {
+	if got := resolveTmuxName(sidOld, panes, snaps, noOwn()); got != defaultTmuxName(sidOld) {
 		t.Fatalf("无 pane 应回落本名 %q,得 %q", defaultTmuxName(sidOld), got)
 	}
-	if live := liveSessionIDs(panes, snaps); live[sidOld] {
+	if live := liveSessionIDs(panes, snaps, noOwn()); live[sidOld] {
 		t.Fatalf("无 pane 的会话应 live=false")
 	}
 }
@@ -93,14 +96,14 @@ func TestResolveStaleNotCurrent(t *testing.T) {
 	panes := []tmuxPane{clausePane("cc-zzzzzzzz", cwd, "2.1.167")} // 另一无关名的 pane 在该 cwd 跑
 
 	// sidOld 不是 cwd 的当前会话 → 保持本名(不蹭 cc-zzzzzzzz)。
-	if got := resolveTmuxName(sidOld, panes, snaps); got != defaultTmuxName(sidOld) {
+	if got := resolveTmuxName(sidOld, panes, snaps, noOwn()); got != defaultTmuxName(sidOld) {
 		t.Fatalf("非当前会话不应改绑,应回落本名 %q,得 %q", defaultTmuxName(sidOld), got)
 	}
 	// sidNew 是当前会话 → 解析到该 cwd 在跑 claude 的 pane(cc-zzzzzzzz)。
-	if got := resolveTmuxName(sidNew, panes, snaps); got != "cc-zzzzzzzz" {
+	if got := resolveTmuxName(sidNew, panes, snaps, noOwn()); got != "cc-zzzzzzzz" {
 		t.Fatalf("当前会话应解析到 cwd 内在跑 claude 的 pane cc-zzzzzzzz,得 %q", got)
 	}
-	live := liveSessionIDs(panes, snaps)
+	live := liveSessionIDs(panes, snaps, noOwn())
 	if live[sidOld] || !live[sidNew] {
 		t.Fatalf("应仅当前会话 live:得 old=%v new=%v", live[sidOld], live[sidNew])
 	}
@@ -131,7 +134,7 @@ func TestLiveTwoCwdIndependent(t *testing.T) {
 		clausePane(defaultTmuxName(sidOld), "/a", "2.1.167"), // /a:陈旧名 pane
 		clausePane(defaultTmuxName(sidLoc), "/b", "2.1.167"), // /b:精确同名 pane
 	}
-	live := liveSessionIDs(panes, snaps)
+	live := liveSessionIDs(panes, snaps, noOwn())
 	if live[sidOld] {
 		t.Fatalf("/a 旧会话不应 live")
 	}
@@ -174,11 +177,12 @@ func TestLiveSessionIDsRealConsistent(t *testing.T) {
 		t.Skip("本机无 claude 会话,跳过")
 	}
 	panes := listTmuxPanes()
-	live := liveSessionIDs(panes, snaps)
+	own := ownershipFor(panes, loadPaneMap()) // 真样连真值表一起跑(可能为空,同样合法)
+	live := liveSessionIDs(panes, snaps, own)
 	liveByTmux := map[string]int{}
 	for _, s := range snaps {
 		if live[s.SessionID] {
-			liveByTmux[resolveTmuxName(s.SessionID, panes, snaps)]++
+			liveByTmux[resolveTmuxName(s.SessionID, panes, snaps, own)]++
 		}
 	}
 	for name, n := range liveByTmux {
@@ -187,4 +191,14 @@ func TestLiveSessionIDsRealConsistent(t *testing.T) {
 		}
 	}
 	t.Logf("snaps=%d panes=%d live-tmux=%d", len(snaps), len(panes), len(liveByTmux))
+}
+
+// TestStatusLineCount status 选项值 → 状态栏行数(客户端视口 = 窗口 + 状态栏)。
+func TestStatusLineCount(t *testing.T) {
+	cases := map[string]int{"off": 0, "0": 0, "": 0, "on": 1, "1": 1, "2": 2, "5": 5, "weird": 1}
+	for in, want := range cases {
+		if got := statusLineCount(in); got != want {
+			t.Fatalf("statusLineCount(%q)=%d, want %d", in, got, want)
+		}
+	}
 }

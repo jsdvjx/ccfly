@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,14 +34,49 @@ type claudeSnapshot struct {
 	AgeSec    int64  `json:"age_sec"` // 距最后活动秒数
 }
 
+// ── 扫描缓存(claudecache):按 mtime+size 免重扫 idle 会话 ───────────────────────
+// jsonl 是 append-only:任何新行都改 size(通常也改 mtime),故 (mtimeNs,size) 是充分缓存键。
+// 68 个会话里绝大多数每轮命中,O(ReadDir) 取代 O(读全部行);只有正在增长的 1~2 个文件重扫。
+type scanCacheEntry struct {
+	mtimeNs int64
+	size    int64
+	snap    claudeSnapshot
+	ok      bool // scanOneSession 的第二返回值(MsgCount==0 → false,仍缓存以免反复开空文件)
+}
+
+var (
+	scanMu    sync.Mutex // 守 scanCache;仅护 map 读写,绝不跨 scanOneSession(磁盘/解析)持有
+	scanCache = map[string]scanCacheEntry{}
+
+	memoMu    sync.Mutex // 守整轮结果 memo(与 scanMu 独立)
+	memoSnaps []claudeSnapshot
+	memoAt    time.Time
+)
+
+// memoTTL 远小于 useSessions 的 5s 轮询:只合并「同一刻多端点扇出」,绝不放陈旧。
+const memoTTL = 800 * time.Millisecond
+
 // scanClaudeSessions 扫描 <claudeProjectsDir>/**/*.jsonl,每个会话出一个快照。
+// 经 (mtime+size) 逐文件缓存 + 一个短整轮 memo 加速:idle 会话复用上次解析,只有变动/新增的
+// 文件才付全行扫描;并发端点调用安全(锁只护 map/slice,绝不跨磁盘 I/O)。
 func scanClaudeSessions() ([]claudeSnapshot, error) {
+	// 0) 整轮 memo 快路径:窗口内多端点(/sessions + resolveSessionParam×N + /sse)共用一次结果。
+	//    返回拷贝——绝不外泄内部切片(并发调用方可能各自处理)。
+	memoMu.Lock()
+	if memoSnaps != nil && time.Since(memoAt) < memoTTL {
+		out := append([]claudeSnapshot(nil), memoSnaps...)
+		memoMu.Unlock()
+		return out, nil
+	}
+	memoMu.Unlock()
+
 	root := claudeProjectsDir()
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
 	}
 	out := []claudeSnapshot{}
+	seen := make(map[string]bool, 128) // 本轮真实存在的文件 → 据此逐出已删条目
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -51,12 +87,52 @@ func scanClaudeSessions() ([]claudeSnapshot, error) {
 			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
 				continue
 			}
-			if snap, ok := scanOneSession(filepath.Join(pdir, f.Name())); ok {
+			path := filepath.Join(pdir, f.Name())
+			fi, statErr := f.Info() // DirEntry.Info():复用 ReadDir 已得 stat,省一次 syscall
+			if statErr != nil {
+				continue // ReadDir 与 Info 之间文件消失等 → 跳过,且不入 seen → 自然逐出
+			}
+			seen[path] = true
+			if snap, ok := cachedScanOne(path, fi.ModTime().UnixNano(), fi.Size()); ok {
 				out = append(out, snap)
 			}
 		}
 	}
+	pruneScanCache(seen)
+
+	memoMu.Lock()
+	memoSnaps, memoAt = append([]claudeSnapshot(nil), out...), time.Now()
+	memoMu.Unlock()
 	return out, nil
+}
+
+// cachedScanOne:mtime+size 命中则复用解析;否则锁外重扫并回填。
+// 重活(scanOneSession:开文件 + 全行 JSON)在锁外做,并发端点扫不同变动文件不互相阻塞。
+func cachedScanOne(path string, mtimeNs, size int64) (claudeSnapshot, bool) {
+	scanMu.Lock()
+	if e, hit := scanCache[path]; hit && e.mtimeNs == mtimeNs && e.size == size {
+		snap, ok := e.snap, e.ok // claudeSnapshot 是扁平值类型,拷贝出锁安全
+		scanMu.Unlock()
+		return snap, ok
+	}
+	scanMu.Unlock()
+
+	snap, ok := scanOneSession(path) // 只在文件变了时付费;两 goroutine 同时 miss 同文件无害(幂等)
+	scanMu.Lock()
+	scanCache[path] = scanCacheEntry{mtimeNs: mtimeNs, size: size, snap: snap, ok: ok}
+	scanMu.Unlock()
+	return snap, ok
+}
+
+// pruneScanCache:逐出本轮 ReadDir 未见到的路径(会话 jsonl 被删/迁移/换 --claude-dir)。
+func pruneScanCache(seen map[string]bool) {
+	scanMu.Lock()
+	for p := range scanCache {
+		if !seen[p] {
+			delete(scanCache, p)
+		}
+	}
+	scanMu.Unlock()
 }
 
 type rawEvent struct {

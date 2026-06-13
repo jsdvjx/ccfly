@@ -41,6 +41,13 @@ type sessionRow struct {
 	AgeSec    int64  `json:"age_sec"`
 	Preview   string `json:"preview,omitempty"`
 	Live      bool   `json:"live"`
+	// chat 视图隐藏终端「自适应现有 tmux 尺寸」用:有客户端在连(attached>0)就沿用 cols/rows,不 resize。
+	Cols     int `json:"cols,omitempty"`
+	Rows     int `json:"rows,omitempty"`
+	Attached int `json:"attached,omitempty"`
+	// Tmux:该会话实际跑在的 tmux 会话名(resolveTmuxName 解析结果,扛 /clear 后的名字残留)。
+	// 表世界直接展示用;仅在解析到的名字确实在跑时填(与 cols/rows 同一分支)。
+	Tmux string `json:"tmux,omitempty"`
 }
 
 // handleSessions — GET /sessions:落地页会话列表(SessionMeta[] 形状 + 落地页补充字段)。
@@ -52,13 +59,18 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 	}
 	host := hostName()
 	// live 判定经 tmuxresolve:扛 /clear——一个 pane 多次 /clear 后名字陈旧,但「当前」会话仍
-	// 应显示 live(见 liveSessionIDs)。一次 list-panes,O(会话数) 查表,廉价。
+	// 应显示 live(见 liveSessionIDs)。一次 list-panes + 一次真值表,O(会话数) 查表,廉价。
 	panes := listTmuxPanes()
-	live := liveSessionIDs(panes, snaps)
+	own := ownershipFor(panes, loadPaneMap())
+	live := liveSessionIDs(panes, snaps, own)
+	byName := make(map[string]tmuxPane, len(panes))
+	for _, p := range panes {
+		byName[p.Name] = p
+	}
 
 	rows := make([]sessionRow, 0, len(snaps))
 	for _, s := range snaps {
-		rows = append(rows, sessionRow{
+		row := sessionRow{
 			Hostname:  host,
 			SessionID: s.SessionID,
 			Title:     s.Title,
@@ -72,7 +84,17 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 			AgeSec:    s.AgeSec,
 			Preview:   s.Preview,
 			Live:      live[s.SessionID],
-		})
+		}
+		// 该会话当前在跑的 pane(扛 /clear)→ 透出尺寸 + attach 数,供 chat 隐藏终端自适应;
+		// 顺带透出真实 tmux 会话名(表世界直接展示)。
+		// rows 按「客户端视口」报 = 窗口行数 + 状态栏行数:消费方拿它当 PTY 尺寸连入。
+		// 若只报窗口行数,web 客户端会比现有客户端矮一行(状态栏吃掉),tmux 裁掉 pane 最底行
+		// —— 那正是表世界读屏检测的 idle footer 锚点,裁掉即全线误判(卡死「生成中」实案)。
+		if p, ok := byName[resolveTmuxName(s.SessionID, panes, snaps, own)]; ok {
+			row.Cols, row.Rows, row.Attached = p.WinW, p.WinH+p.StatusLines, p.Attached
+			row.Tmux = p.Name
+		}
+		rows = append(rows, row)
 	}
 	// 按 last_ts 倒序(最近活动在前);时间戳缺失/无法解析的沉底。
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].MtimeMs > rows[j].MtimeMs })

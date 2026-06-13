@@ -40,6 +40,7 @@ import (
 const (
 	cmdOutput = '0' // server→client:OUTPUT;client→server:INPUT
 	cmdResize = '1' // client→server:RESIZE_TERMINAL
+	cmdPing   = '9' // ccfly 扩展:client→server PING,server 原样回 PONG(端到端心跳,拒止半开假活)
 )
 
 // termHandshake — 客户端首帧(无前缀 JSON)。AuthToken 忽略。
@@ -69,6 +70,20 @@ func handleTerm(w http.ResponseWriter, r *http.Request) {
 	sess = resolveSessionParam(sess)
 	cwd := r.URL.Query().Get("cwd")
 	cmd := r.URL.Query().Get("cmd")
+
+	// 自动起 claude:前端不传 cmd —— 若解析出的 tmux 尚未在跑,new-session -A 会新建它,此时让它
+	// 直接 `claude --resume <sid>`(在会话原始 cwd),而非裸 shell。已在跑 → -A 忽略此 cmd 只 attach
+	// (= 已在跑 claude 就只接上,/clear 镜像现场原样保留)。任何不确定 → 不注入,保持今日裸壳行为。
+	if cmd == "" {
+		if snaps, e := scanClaudeSessions(); e == nil { // 已缓存,廉价
+			if c, cw, ok := claudeResumeCmd(sess, snaps); ok {
+				cmd = c
+				if cwd == "" {
+					cwd = cw
+				}
+			}
+		}
+	}
 
 	// 升级:接受 'tty' 子协议(ttyd 用),也接受无子协议(前端可不带)。
 	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -117,8 +132,14 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 		}
 	}
 
+	// tmux 默认 window-size=latest:最近 attach 的客户端尺寸即窗口尺寸 —— 手机/隐藏终端这类小(甚至 1 行)
+	// 客户端 attach 会把整个窗口拖小,极端时压成 1 行,claude 便无法渲染输入框/接收 paste+回车(发不出消息)。
+	// 改全局 largest:窗口取**最大**客户端尺寸,小客户端不再缩它(本地大终端在,就保持本地的大小)。幂等,失败忽略。
+	_ = exec.Command("tmux", "set-option", "-g", "window-size", "largest").Run()
+
 	// 2) 起 tmux(在 PTY 里),attach-or-create 同名会话 → 与本地/其它端实时镜像。
-	args := []string{"new-session", "-A", "-s", sess}
+	// -u:强制把客户端当 UTF-8(否则最小环境下 tmux 客户端 utf8=0,会把中文/符号降级成 '_')。
+	args := []string{"-u", "new-session", "-A", "-s", sess}
 	if cwd != "" {
 		args = append(args, "-c", cwd)
 	}
@@ -144,6 +165,14 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 
 	var wg sync.WaitGroup
 
+	// WS 写互斥:输出泵(3a)与 PONG 回写(3b)分属两个 goroutine,串行化写帧。
+	var wmu sync.Mutex
+	wsWrite := func(frame []byte) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return c.Write(ctx, websocket.MessageBinary, frame)
+	}
+
 	// 3a) PTY → WS:边读边发 '0'+bytes(OUTPUT)。读到 EOF/错误即取消全员。
 	wg.Add(1)
 	go func() {
@@ -156,7 +185,7 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 				frame := make([]byte, 1+n)
 				frame[0] = cmdOutput
 				copy(frame[1:], buf[:n])
-				if werr := c.Write(ctx, websocket.MessageBinary, frame); werr != nil {
+				if werr := wsWrite(frame); werr != nil {
 					return
 				}
 			}
@@ -190,6 +219,10 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 				var rz termResize
 				if json.Unmarshal(msg[1:], &rz) == nil && rz.Columns > 0 && rz.Rows > 0 {
 					_ = pty.Setsize(ptmx, &pty.Winsize{Cols: rz.Columns, Rows: rz.Rows})
+				}
+			case cmdPing: // PING('9')→ 原样回 PONG:浏览器据此判端到端链路活性
+				if werr := wsWrite(msg); werr != nil {
+					return
 				}
 			default:
 				// '2'(pause)等:忽略。

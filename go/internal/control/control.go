@@ -84,9 +84,12 @@ func Handler() http.Handler {
 	mux.HandleFunc("GET /state", handleState)
 	mux.HandleFunc("GET /info", handleInfo)
 	mux.HandleFunc("POST /start", handleStart)
-	mux.HandleFunc("POST /upload", handleUpload)    // 表世界图片/文件上传 → 落盘会话 cwd 的 .ccfly-uploads/(见 upload.go)
-	mux.HandleFunc("GET /term", handleTerm)         // 自带网页终端 WS(ttyd 兼容);去外部 ttyd 依赖
-	mux.HandleFunc("GET /sessions", handleSessions) // 落地页会话列表(SessionMeta[] 形状)
+	mux.HandleFunc("POST /takeover", handleTakeover) // 接管:杀掉会话既有 claude 进程,随后 /term 重建进 tmux(见 takeover.go)
+	mux.HandleFunc("POST /upload", handleUpload)     // 表世界图片/文件上传 → 落盘会话 cwd 的 .ccfly-uploads/(见 upload.go)
+	mux.HandleFunc("GET /term", handleTerm)          // 自带网页终端 WS(ttyd 兼容);去外部 ttyd 依赖
+	mux.HandleFunc("GET /sessions", handleSessions)  // 落地页会话列表(SessionMeta[] 形状)
+	mux.HandleFunc("GET /sse/jsonl", handleSseJsonl)      // 原始 jsonl 增量流(SSE,fsnotify;ccfly-ttyd-ui 状态源)
+	mux.HandleFunc("GET /jsonl/before", handleJsonlBefore) // 向上翻页:before 字节前的一窗更老原始行(无状态)
 	// 内嵌 web 表世界 SPA:必须最后注册「GET /」兜底。Go 1.22 ServeMux「最具体优先」,
 	// 上面各显式 API 路由自动赢过它;剩下「非 API、无文件」路径回退 index.html(history 路由)。
 	mux.HandleFunc("GET /", staticHandler())
@@ -112,6 +115,7 @@ func Serve(ctx context.Context, bind string) error {
 		defer cancel()
 		_ = srv.Shutdown(sctx)
 	}()
+	go RunScanner(ctx) // 后台巡检:回收 cc-* 孤儿壳 + 预热扫描缓存(随 ctx 结束而停)
 	log.Printf("ccfly control: listening on %s (claude dir=%s)", bind, claudeProjectsDir())
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
@@ -152,7 +156,14 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 解析到真正在跑的 tmux:前端 /clear 后仍按「新 sid」发来 cc-<Y[:8]>,这里落到真 pane cc-<X[:8]>。
-	sess := resolveSessionParam(req.Session)
+	// stale = 真值表证实请求的会话已不在该 pane 里(/clear 后名字残留、pane 已易主)——
+	// 一切发键(打字/具名键/提交)一律 409 拒发:往易主 pane 送任何键都是打进别人的对话
+	// (Escape 都可能中断别人正在跑的回合)。前端冒「会话已被取代」并引导回列表。
+	sess, stale := resolveSessionTarget(req.Session)
+	if stale {
+		ctrlJSON(w, 409, map[string]any{"ok": false, "kind": "stale"})
+		return
+	}
 	// 原子提交判定:Clear+Enter,且「有文本 或 有待粘贴图片」。
 	// 注意把「纯发图」(Text 空、Images 非空)也算作原子提交 —— 否则纯图消息既过不了 server floor、
 	// 也走不进下面的图片原生粘贴分支,图片会被悄悄丢弃。server floor 与图片粘贴共用这一条件。
@@ -436,7 +447,14 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		ctrlErr(w, 400, "session required")
 		return
 	}
-	sess = resolveSessionParam(sess) // 扛 /clear:解析到真正在跑的 tmux(否则 /clear 后总判 offline)
+	// 扛 /clear:解析到真正在跑的 tmux(否则 /clear 后总判 offline)。
+	// stale(pane 已易主)→ 对请求的那个会话而言就是 offline:别把别人会话的 input 态
+	// 误报给它(那会诱导前端放行提交,再被 /sendkeys 的 409 拦——不如源头就说不可用)。
+	sess, stale := resolveSessionTarget(sess)
+	if stale {
+		ctrlJSON(w, 200, ctrlState{Kind: "offline"})
+		return
+	}
 	// -e 保留 ANSI 上色:detectState 内部对各判定先剥色,但「输入建议」靠 dim 属性识别,需带色原文。
 	out, err := exec.Command("tmux", "capture-pane", "-t", sess, "-p", "-e").CombinedOutput()
 	if err != nil {
@@ -463,12 +481,29 @@ func handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	// 扛 /clear:若该 sid 其实是某个在跑 pane 的「当前会话」(名字已陈旧),解析到那个真 pane。
 	// 解析后名字已在跑 → 视作已启动(幂等返回 ok),不再 new-session(否则 tmux 报 duplicate)。
-	sess := resolveSessionParam(req.Session)
+	// stale = 同名 tmux 在跑但已易主(跑着别的会话):既不能谎称 already,也无法同名新建 → 409。
+	sess, stale := resolveSessionTarget(req.Session)
+	if stale {
+		ctrlJSON(w, 409, map[string]any{"ok": false, "kind": "stale"})
+		return
+	}
 	if tmuxSessionLive(sess) {
 		ctrlJSON(w, 200, map[string]any{"ok": true, "already": true})
 		return
 	}
-	args := []string{"new-session", "-d", "-s", sess}
+	// 调用方没给 cmd → 自动起 claude --resume(同 /term 口径),把离线会话按原始 cwd 拉活成 claude
+	// 而非裸壳(这正是 /start 的用途)。上面的 tmuxSessionLive 短路已保证不重启在跑会话。
+	if req.Cmd == "" {
+		if snaps, e := scanClaudeSessions(); e == nil {
+			if c, cw, ok := claudeResumeCmd(sess, snaps); ok {
+				req.Cmd = c
+				if req.Cwd == "" {
+					req.Cwd = cw
+				}
+			}
+		}
+	}
+	args := []string{"-u", "new-session", "-d", "-s", sess} // -u:UTF-8 客户端(防中文/符号被降级成 '_')
 	if req.Cwd != "" {
 		args = append(args, "-c", req.Cwd)
 	}
