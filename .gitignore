@@ -38,3 +38,6 @@ pnpm-debug.log*
 .idea/
 .DS_Store
 *.sw?
+
+# claude code 会话本地数据
+.claude/
