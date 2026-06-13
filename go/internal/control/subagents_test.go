@@ -77,7 +77,7 @@ func TestScanRunningAgentsSyncCompleted(t *testing.T) {
 }
 
 // TestScanRunningAgentsTerminalStatuses:后台 agent 的 task-notification 用各种终止态拼写
-//(尤其 JS 系双 l 的 "cancelled"、timed_out、error 等)都应判定完成,不再卡在「运行中」。
+// (尤其 JS 系双 l 的 "cancelled"、timed_out、error 等)都应判定完成,不再卡在「运行中」。
 // 这是「已完成却仍显运行」(AgentDock 一直「N 个运行中」)误报的回归护栏。
 func TestScanRunningAgentsTerminalStatuses(t *testing.T) {
 	for _, status := range []string{"cancelled", "canceled", "timed_out", "timeout", "error", "aborted", "interrupted", "failed", "stopped", "killed"} {

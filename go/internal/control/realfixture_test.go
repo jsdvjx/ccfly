@@ -28,8 +28,10 @@ func realClaudeProjectsRoot() string {
 }
 
 // discoverRealSession 在本地 claude projects 里找任意一个会话,返回
-//   projectDir = <root>/<projectSlug>(会话目录的父目录)
-//   sid        = 该会话的文件名(去 .jsonl)
+//
+//	projectDir = <root>/<projectSlug>(会话目录的父目录)
+//	sid        = 该会话的文件名(去 .jsonl)
+//
 // 若没有任何本地会话,返回 ("", "")——调用方据此 t.Skip。
 func discoverRealSession() (projectDir, sid string) {
 	root := realClaudeProjectsRoot()

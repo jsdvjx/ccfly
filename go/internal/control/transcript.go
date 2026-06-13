@@ -335,8 +335,8 @@ func startByteForLastN(path string, endByte int64, maxItems int, maxBytes int64)
 	defer f.Close()
 
 	const blk = 64 * 1024
-	pos := endByte    // 已扫描区间 [pos, endByte) 的左端,向 0 收缩
-	newlines := 0     // 在 [pos, endByte) 区间内见到的 '\n' 个数
+	pos := endByte           // 已扫描区间 [pos, endByte) 的左端,向 0 收缩
+	newlines := 0            // 在 [pos, endByte) 区间内见到的 '\n' 个数
 	lastLineStart := endByte // 最近一个「行首」(某个 '\n' 之后那个字节);初值=endByte(末行无尾换行时的行首兜底)
 	buf := make([]byte, blk)
 	for pos > 0 {

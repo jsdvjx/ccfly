@@ -14,9 +14,9 @@ import (
 func TestReadCmdResult(t *testing.T) {
 	lines := []string{
 		`{"type":"system","subtype":"local_command","content":"<command-name>/context</command-name>"}`,
-		`{"type":"user","isMeta":false,"message":{"content":"this is a real user message"}}`,                 // 真用户:无 isMeta → 跳过
-		`{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"array form"}]}}`,           // isMeta 但数组型 → 跳过
-		`{not valid json`,                                                                                     // 坏行 → 跳过
+		`{"type":"user","isMeta":false,"message":{"content":"this is a real user message"}}`,        // 真用户:无 isMeta → 跳过
+		`{"type":"user","isMeta":true,"message":{"content":[{"type":"text","text":"array form"}]}}`, // isMeta 但数组型 → 跳过
+		`{not valid json`, // 坏行 → 跳过
 		`{"type":"user","isMeta":true,"message":{"content":"## Context Usage\n\n| Category | Tokens |\n|--|--|"}}`, // 命中
 		`{"type":"user","isMeta":true,"message":{"content":"## second one (should not be returned)"}}`,
 	}
