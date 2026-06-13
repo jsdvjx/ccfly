@@ -1,8 +1,13 @@
-// Package svc installs `ccfly connect` as a persistent OS service so a device
+// Package svc installs a ccfly binary as a persistent OS service so a device
 // stays joined to the overlay across terminal close / logout / reboot / sleep
 // (macOS launchd, Linux systemd). User-level by default; --system for a
 // system-wide service (needs root) that survives logout / multi-user, on par
 // with a root mesh daemon.
+//
+// The service identity + command are described by a Profile. With no Profile
+// the default `ccfly connect <target> --claude-dir <dir>` (tmux-requiring)
+// agent is installed; ccfly-mesh supplies its own Profile for a lean, separate,
+// tmux-free mesh-only service.
 package svc
 
 import (
@@ -23,12 +28,49 @@ type Options struct {
 	System    bool   // system-wide service (needs root)
 	ClaudeDir string // optional override; default <home>/.claude/projects
 	DryRun    bool   // print what would happen, change nothing
+
+	// ExtraArgs are appended to the default ccfly agent's connect command (e.g.
+	// --overlay-forward ...). Ignored when Profile is set.
+	ExtraArgs []string
+
+	// Profile overrides the service identity + command. When nil the default
+	// ccfly agent profile is used (preserving existing behavior).
+	Profile *Profile
+}
+
+// Profile describes one installable service: its identity (names) and the exact
+// command to run. Args is the full argv AFTER the binary path.
+type Profile struct {
+	DarwinLabel string   // launchd Label, e.g. com.ccfly.agent
+	LinuxUnit   string   // systemd unit base name, e.g. ccfly
+	BinName     string   // installed binary file name, e.g. ccfly
+	Description string   // systemd unit Description / human text
+	Args        []string // argv after the binary
+	NeedsTmux   bool     // require tmux on PATH (fail install if missing)
 }
 
 const (
 	darwinLabel = "com.ccfly.agent"
 	linuxUnit   = "ccfly"
 )
+
+// resolve returns the effective Profile: an explicit o.Profile, or the default
+// ccfly agent (`connect <target> --claude-dir <dir>`, tmux-requiring).
+func (o Options) resolve(home string) Profile {
+	if o.Profile != nil {
+		return *o.Profile
+	}
+	args := []string{"connect", o.Target, "--claude-dir", claudeDirOf(o, home)}
+	args = append(args, o.ExtraArgs...)
+	return Profile{
+		DarwinLabel: darwinLabel,
+		LinuxUnit:   linuxUnit,
+		BinName:     "ccfly",
+		Description: "ccfly overlay agent",
+		Args:        args,
+		NeedsTmux:   true,
+	}
+}
 
 // Install sets up the persistent service for the current platform.
 func Install(o Options) error {
@@ -128,8 +170,7 @@ func run(name string, args ...string) error {
 
 func validate(o Options) error {
 	// Target 可为 "<host>/<code>"(连接码流程)或纯 "<host>"(无码配对:配对已在
-	// install 阶段交互式完成、身份落盘,服务只需 `connect <host>` 凭旧身份重连)。
-	// 两种都合法,这里只校验非空。
+	// install 阶段交互式完成、身份落盘,服务只需凭旧身份重连)。两种都合法,只校验非空。
 	if strings.TrimSpace(o.Target) == "" {
 		return fmt.Errorf("missing <host>[/<code>]")
 	}
@@ -139,12 +180,12 @@ func validate(o Options) error {
 	return nil
 }
 
-// toolPATH locates tmux (ccfly needs it for terminal / session control) and
-// returns a PATH string with tmux's own dir first — so the installed service
-// resolves tmux even under launchd/systemd's minimal PATH (which omits
-// /opt/homebrew/bin). It errors if tmux isn't installed at all, so `ccfly
-// install` fails fast instead of leaving a service that dies at runtime.
-func toolPATH() (pathEnv, tmuxPath string, err error) {
+// servicePATH builds the PATH the installed service runs with: the standard
+// dirs, with tmux's own dir first when tmux is found (so launchd/systemd's
+// minimal PATH still resolves it). When needTmux and tmux is absent it errors,
+// so `ccfly install` fails fast rather than leaving a service that dies; a
+// mesh-only service (needTmux=false) does not require tmux.
+func servicePATH(needTmux bool) (pathEnv, tmuxPath string, err error) {
 	std := []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
 	tmuxPath, _ = exec.LookPath("tmux")
 	if tmuxPath == "" { // PATH may be minimal (e.g. under sudo) — scan common dirs
@@ -157,7 +198,10 @@ func toolPATH() (pathEnv, tmuxPath string, err error) {
 		}
 	}
 	if tmuxPath == "" {
-		return "", "", fmt.Errorf("tmux 未找到 —— 先安装(如 `brew install tmux`);ccfly 的终端/会话控制依赖 tmux")
+		if needTmux {
+			return "", "", fmt.Errorf("tmux 未找到 —— 先安装(如 `brew install tmux`);ccfly 的终端/会话控制依赖 tmux")
+		}
+		return strings.Join(std, ":"), "", nil
 	}
 	dirs := []string{filepath.Dir(tmuxPath)}
 	seen := map[string]bool{dirs[0]: true}
@@ -170,36 +214,48 @@ func toolPATH() (pathEnv, tmuxPath string, err error) {
 	return strings.Join(dirs, ":"), tmuxPath, nil
 }
 
+func xmlEsc(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
+}
+
 // ── macOS (launchd) ──
 
 func installDarwin(o Options) error {
 	if err := validate(o); err != nil {
 		return err
 	}
-	svcPATH, tmuxPath, err := toolPATH()
-	if err != nil {
-		return fmt.Errorf("ccfly install: %w", err)
-	}
-	fmt.Printf("✓ tmux: %s\n", tmuxPath)
 	name, home, uid, gid, err := runAs(o.System)
 	if err != nil {
 		return err
+	}
+	p := o.resolve(home)
+	svcPATH, tmuxPath, err := servicePATH(p.NeedsTmux)
+	if err != nil {
+		return fmt.Errorf("ccfly install: %w", err)
+	}
+	if tmuxPath != "" {
+		fmt.Printf("✓ tmux: %s\n", tmuxPath)
 	}
 	self, err := selfPath()
 	if err != nil {
 		return err
 	}
-	claude := claudeDirOf(o, home)
-	logPath := filepath.Join(home, ".ccfly", "ccfly.log")
+	logPath := filepath.Join(home, ".ccfly", p.BinName+".log")
 
 	var binPath, plistPath, userElem string
 	if o.System {
-		binPath = "/usr/local/bin/ccfly"
-		plistPath = "/Library/LaunchDaemons/" + darwinLabel + ".plist"
+		binPath = "/usr/local/bin/" + p.BinName
+		plistPath = "/Library/LaunchDaemons/" + p.DarwinLabel + ".plist"
 		userElem = "  <key>UserName</key><string>" + name + "</string>\n"
 	} else {
-		binPath = filepath.Join(home, ".ccfly", "bin", "ccfly")
-		plistPath = filepath.Join(home, "Library", "LaunchAgents", darwinLabel+".plist")
+		binPath = filepath.Join(home, ".ccfly", "bin", p.BinName)
+		plistPath = filepath.Join(home, "Library", "LaunchAgents", p.DarwinLabel+".plist")
+	}
+
+	var prog strings.Builder
+	prog.WriteString("    <string>" + xmlEsc(binPath) + "</string>\n")
+	for _, a := range p.Args {
+		prog.WriteString("    <string>" + xmlEsc(a) + "</string>\n")
 	}
 
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
@@ -207,12 +263,7 @@ func installDarwin(o Options) error {
 <plist version="1.0"><dict>
   <key>Label</key><string>%s</string>
 %s  <key>ProgramArguments</key><array>
-    <string>%s</string>
-    <string>connect</string>
-    <string>%s</string>
-    <string>--claude-dir</string>
-    <string>%s</string>
-  </array>
+%s  </array>
   <key>EnvironmentVariables</key><dict><key>HOME</key><string>%s</string><key>PATH</key><string>%s</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -220,7 +271,7 @@ func installDarwin(o Options) error {
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
-`, darwinLabel, userElem, binPath, o.Target, claude, home, svcPATH, logPath, logPath)
+`, p.DarwinLabel, userElem, prog.String(), home, svcPATH, logPath, logPath)
 
 	if o.DryRun {
 		fmt.Printf("# bin   -> %s (copy of %s)\n# plist -> %s\n# run as %s, HOME=%s\n\n%s", binPath, self, plistPath, name, home, plist)
@@ -251,8 +302,8 @@ func installDarwin(o Options) error {
 	if err := run("launchctl", "load", "-w", plistPath); err != nil {
 		return fmt.Errorf("launchctl load: %w", err)
 	}
-	fmt.Printf("✓ installed launchd %s service %s\n  bin: %s\n  log: %s\n  uninstall: ccfly uninstall%s\n",
-		domain, darwinLabel, binPath, logPath, systemFlag(o.System))
+	fmt.Printf("✓ installed launchd %s service %s\n  bin: %s\n  log: %s\n  uninstall: %s uninstall%s\n",
+		domain, p.DarwinLabel, binPath, logPath, p.BinName, systemFlag(o.System))
 	return nil
 }
 
@@ -264,9 +315,10 @@ func uninstallDarwin(o Options) error {
 	if err != nil {
 		return err
 	}
-	plistPath := filepath.Join(home, "Library", "LaunchAgents", darwinLabel+".plist")
+	p := o.resolve(home)
+	plistPath := filepath.Join(home, "Library", "LaunchAgents", p.DarwinLabel+".plist")
 	if o.System {
-		plistPath = "/Library/LaunchDaemons/" + darwinLabel + ".plist"
+		plistPath = "/Library/LaunchDaemons/" + p.DarwinLabel + ".plist"
 	}
 	if o.DryRun {
 		fmt.Printf("# would unload + rm %s\n", plistPath)
@@ -286,46 +338,53 @@ func installLinux(o Options) error {
 	if err := validate(o); err != nil {
 		return err
 	}
-	svcPATH, tmuxPath, err := toolPATH()
-	if err != nil {
-		return fmt.Errorf("ccfly install: %w", err)
-	}
-	fmt.Printf("✓ tmux: %s\n", tmuxPath)
 	name, home, _, _, err := runAs(o.System)
 	if err != nil {
 		return err
+	}
+	p := o.resolve(home)
+	svcPATH, tmuxPath, err := servicePATH(p.NeedsTmux)
+	if err != nil {
+		return fmt.Errorf("ccfly install: %w", err)
+	}
+	if tmuxPath != "" {
+		fmt.Printf("✓ tmux: %s\n", tmuxPath)
 	}
 	self, err := selfPath()
 	if err != nil {
 		return err
 	}
-	claude := claudeDirOf(o, home)
 
 	var binPath, unitPath, userLine string
 	if o.System {
-		binPath = "/usr/local/bin/ccfly"
-		unitPath = "/etc/systemd/system/" + linuxUnit + ".service"
+		binPath = "/usr/local/bin/" + p.BinName
+		unitPath = "/etc/systemd/system/" + p.LinuxUnit + ".service"
 		userLine = "User=" + name + "\n"
 	} else {
-		binPath = filepath.Join(home, ".ccfly", "bin", "ccfly")
-		unitPath = filepath.Join(home, ".config", "systemd", "user", linuxUnit+".service")
+		binPath = filepath.Join(home, ".ccfly", "bin", p.BinName)
+		unitPath = filepath.Join(home, ".config", "systemd", "user", p.LinuxUnit+".service")
+	}
+
+	execStart := binPath
+	if len(p.Args) > 0 {
+		execStart += " " + strings.Join(p.Args, " ")
 	}
 
 	unit := fmt.Sprintf(`[Unit]
-Description=ccfly overlay agent
+Description=%s
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 %sEnvironment=HOME=%s
 Environment=PATH=%s
-ExecStart=%s connect %s --claude-dir %s
+ExecStart=%s
 Restart=always
 RestartSec=3
 
 [Install]
 WantedBy=%s
-`, userLine, home, svcPATH, binPath, o.Target, claude, wantedBy(o.System))
+`, p.Description, userLine, home, svcPATH, execStart, wantedBy(o.System))
 
 	if o.DryRun {
 		fmt.Printf("# bin  -> %s (copy of %s)\n# unit -> %s\n\n%s", binPath, self, unitPath, unit)
@@ -343,46 +402,46 @@ WantedBy=%s
 	}
 	if o.System {
 		_ = run("systemctl", "daemon-reload")
-		if err := run("systemctl", "enable", "--now", linuxUnit); err != nil {
+		if err := run("systemctl", "enable", "--now", p.LinuxUnit); err != nil {
 			return fmt.Errorf("systemctl enable: %w", err)
 		}
 	} else {
 		_ = run("systemctl", "--user", "daemon-reload")
-		if err := run("systemctl", "--user", "enable", "--now", linuxUnit); err != nil {
+		if err := run("systemctl", "--user", "enable", "--now", p.LinuxUnit); err != nil {
 			return fmt.Errorf("systemctl --user enable: %w", err)
 		}
 		// survive logout (best-effort; may need root on some distros)
 		_ = run("loginctl", "enable-linger", name)
 	}
-	fmt.Printf("✓ installed systemd %s service %s\n  bin: %s\n  logs: journalctl%s -u %s -f\n  uninstall: ccfly uninstall%s\n",
-		domainOf(o.System), linuxUnit, binPath, userJournalFlag(o.System), linuxUnit, systemFlag(o.System))
+	fmt.Printf("✓ installed systemd %s service %s\n  bin: %s\n  logs: journalctl%s -u %s -f\n  uninstall: %s uninstall%s\n",
+		domainOf(o.System), p.LinuxUnit, binPath, userJournalFlag(o.System), p.LinuxUnit, p.BinName, systemFlag(o.System))
 	return nil
 }
 
 func uninstallLinux(o Options) error {
-	name, _, _, _, err := runAs(o.System)
+	name, home, _, _, err := runAs(o.System)
 	if err != nil {
 		return err
 	}
+	p := o.resolve(home)
 	if o.DryRun {
-		fmt.Printf("# would disable + remove systemd unit %s (%s)\n", linuxUnit, domainOf(o.System))
+		fmt.Printf("# would disable + remove systemd unit %s (%s)\n", p.LinuxUnit, domainOf(o.System))
 		return nil
 	}
 	if o.System {
 		if os.Geteuid() != 0 {
 			return fmt.Errorf("--system needs root: re-run with sudo")
 		}
-		_ = run("systemctl", "disable", "--now", linuxUnit)
-		_ = os.Remove("/etc/systemd/system/" + linuxUnit + ".service")
+		_ = run("systemctl", "disable", "--now", p.LinuxUnit)
+		_ = os.Remove("/etc/systemd/system/" + p.LinuxUnit + ".service")
 		_ = run("systemctl", "daemon-reload")
 	} else {
-		_ = run("systemctl", "--user", "disable", "--now", linuxUnit)
-		home, _ := os.UserHomeDir()
-		_ = os.Remove(filepath.Join(home, ".config", "systemd", "user", linuxUnit+".service"))
+		_ = run("systemctl", "--user", "disable", "--now", p.LinuxUnit)
+		_ = os.Remove(filepath.Join(home, ".config", "systemd", "user", p.LinuxUnit+".service"))
 		_ = run("systemctl", "--user", "daemon-reload")
 	}
 	_ = name
-	fmt.Printf("✓ removed systemd %s service %s\n", domainOf(o.System), linuxUnit)
+	fmt.Printf("✓ removed systemd %s service %s\n", domainOf(o.System), p.LinuxUnit)
 	return nil
 }
 

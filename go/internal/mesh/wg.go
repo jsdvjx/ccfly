@@ -52,6 +52,15 @@ func SetLocalControlPort(p int) {
 	}
 }
 
+// controlProxyEnabled gates the overlay control-API proxy (overlayIP:7699 →
+// local ccfly serve). Mesh-only clients (ccfly-mesh on sing-box / byway hosts)
+// have no control service, so they turn it off and run only the configured
+// expose/forward bridges.
+var controlProxyEnabled = true
+
+// SetControlProxyEnabled toggles the overlay control-API proxy on this node.
+func SetControlProxyEnabled(on bool) { controlProxyEnabled = on }
+
 // maxWGFrameBytes caps a single inbound WS frame. WG MTU is 1420; this is
 // generous headroom while bounding memory per read.
 const maxWGFrameBytes = 64 * 1024
@@ -204,10 +213,10 @@ func (b *clientWSBind) detach(c *websocket.Conn) {
 // wgSession bundles a running WireGuard device + its overlay listener so the
 // caller can tear it all down in one shot when the WS drops.
 type wgSession struct {
-	dev      *device.Device
-	bind     *clientWSBind
-	tun      io.Closer
-	listener io.Closer
+	dev       *device.Device
+	bind      *clientWSBind
+	tun       io.Closer
+	listeners []io.Closer // overlay control proxy + any expose/forward bridges
 }
 
 // close brings the device down and releases the netstack TUN + listener.
@@ -219,8 +228,10 @@ func (s *wgSession) close() {
 	if s == nil {
 		return
 	}
-	if s.listener != nil {
-		_ = s.listener.Close()
+	for _, l := range s.listeners {
+		if l != nil {
+			_ = l.Close()
+		}
 	}
 	if s.bind != nil {
 		_ = s.bind.Close()
@@ -250,6 +261,14 @@ func bringUpWG(ctx context.Context, st *State, c *websocket.Conn) (*wgSession, e
 		return nil, err
 	}
 
+	bind := newClientWSBind(c)
+	logger := device.NewLogger(device.LogLevelError, "ccfly-wg: ")
+
+	// Kernel mode: real kernel TUN with the overlay IP on it, no bridges.
+	if kernelMode {
+		return bringUpKernel(st, overlayAddr, uapi, bind, logger)
+	}
+
 	tunDev, tnet, err := netstack.CreateNetTUN(
 		[]netip.Addr{overlayAddr},
 		nil, // no overlay DNS
@@ -258,9 +277,6 @@ func bringUpWG(ctx context.Context, st *State, c *websocket.Conn) (*wgSession, e
 	if err != nil {
 		return nil, fmt.Errorf("mesh: create netstack tun: %w", err)
 	}
-
-	bind := newClientWSBind(c)
-	logger := device.NewLogger(device.LogLevelError, "ccfly-wg: ")
 	dev := device.NewDevice(tunDev, bind, logger)
 
 	sess := &wgSession{dev: dev, bind: bind, tun: tunDev}
@@ -274,15 +290,42 @@ func bringUpWG(ctx context.Context, st *State, c *websocket.Conn) (*wgSession, e
 		return nil, fmt.Errorf("mesh: wg up: %w", err)
 	}
 
-	ln, err := startOverlayProxy(ctx, tnet, overlayAddr, overlayServicePort, localControlPort)
-	if err != nil {
-		sess.close()
-		return nil, err
+	if controlProxyEnabled {
+		ln, err := startOverlayProxy(ctx, tnet, overlayAddr, overlayServicePort, localControlPort)
+		if err != nil {
+			sess.close()
+			return nil, err
+		}
+		sess.listeners = append(sess.listeners, ln)
+		log.Printf("ccfly: wireguard up — overlay %s, proxy %s:%d → 127.0.0.1:%d",
+			overlayAddr, overlayAddr, overlayServicePort, localControlPort)
+	} else {
+		log.Printf("ccfly: wireguard up — overlay %s (mesh-only: control proxy off)", overlayAddr)
 	}
-	sess.listener = ln
 
-	log.Printf("ccfly: wireguard up — overlay %s, proxy %s:%d → 127.0.0.1:%d",
-		overlayAddr, overlayAddr, overlayServicePort, localControlPort)
+	// Exit side: expose local services (e.g. byway) on the overlay, gated to the
+	// configured source prefixes.
+	for _, sp := range exposeSpecs {
+		l, err := startOverlayExpose(ctx, tnet, overlayAddr, sp)
+		if err != nil {
+			sess.close()
+			return nil, err
+		}
+		sess.listeners = append(sess.listeners, l)
+		log.Printf("ccfly: overlay expose %s:%d → 127.0.0.1:%d (allow %s)",
+			overlayAddr, sp.overlayPort, sp.localPort, sp.allowDesc())
+	}
+	// Center side: forward loopback ports to other nodes' overlay services.
+	for _, fp := range forwardSpecs {
+		l, err := startLocalForward(ctx, tnet, fp)
+		if err != nil {
+			sess.close()
+			return nil, err
+		}
+		sess.listeners = append(sess.listeners, l)
+		log.Printf("ccfly: local forward 127.0.0.1:%d → overlay %s:%d",
+			fp.localPort, fp.dst, fp.dstPort)
+	}
 	return sess, nil
 }
 
@@ -317,19 +360,7 @@ func proxyConn(ctx context.Context, overlayConn net.Conn, port int) {
 		return
 	}
 	defer local.Close()
-
-	done := make(chan struct{}, 2)
-	cp := func(dst, src net.Conn) {
-		_, _ = io.Copy(dst, src)
-		// Half-close write side so the peer sees EOF.
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-		done <- struct{}{}
-	}
-	go cp(local, overlayConn)
-	go cp(overlayConn, local)
-	<-done // first direction to finish; defers close both, unblocking the other
+	relay(overlayConn, local)
 }
 
 // ── UAPI config (HEX keys) ──
