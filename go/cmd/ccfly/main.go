@@ -41,6 +41,15 @@ import (
 var version = "0.0.0-dev"
 
 func main() {
+	// panemap-hook 最先短路:它作为 Claude Code 的 SessionStart hook 在**每次会话启动**时被
+	// 调起,把「当前 tmux pane → 当前 session id」登记进 ~/.ccfly/panemap.json 真值表
+	// (webui 控制端点据此确定性地找到会话所在 pane,杜绝消息错发)。不走 ensureToolPath
+	// (登录壳探测最长 5s,会拖慢每次会话启动;tmux 路径直接继承 claude 的环境)。
+	// 静默:SessionStart hook 的 stdout 会被注入 Claude 上下文,任何失败也绝不打扰会话启动。
+	if len(os.Args) > 1 && os.Args[1] == "panemap-hook" {
+		_ = control.RunPaneMapHook(os.Stdin)
+		return
+	}
 	ensureToolPath()
 	if len(os.Args) < 2 {
 		usage()
@@ -48,6 +57,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	ensureUTF8Locale()
 
 	switch os.Args[1] {
 	case "serve":
@@ -66,6 +76,18 @@ func main() {
 		if err := runUninstall(os.Args[2:]); err != nil {
 			log.Fatalf("uninstall: %v", err)
 		}
+	case "list", "ls":
+		if err := runList(os.Args[2:]); err != nil {
+			log.Fatalf("list: %v", err)
+		}
+	case "attach", "a":
+		if err := runAttach(os.Args[2:]); err != nil {
+			log.Fatalf("attach: %v", err)
+		}
+	case "new":
+		if err := runNew(os.Args[2:]); err != nil {
+			log.Fatalf("new: %v", err)
+		}
 	case "version", "-v", "--version":
 		fmt.Println("ccfly", version)
 	case "help", "-h", "--help":
@@ -75,6 +97,21 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+// ensureUTF8Locale 兜底设一个 UTF-8 locale。launchd 等最小环境常没有 LANG/LC_*,导致子进程 tmux
+// 以「非 UTF-8 客户端」模式运行,把所有多字节字符(中文、claude 的框线/网格符号 ⛀⛁⛶ 等)向那个
+// 客户端输出时统统降级成 '_' —— 浏览器侧任何字体/缓存/重映射都救不了(字符在 tmux 出口就没了)。
+// 设好 locale 后,tmux/claude/capture-pane 全链路按 UTF-8 处理;/term 再叠加 `tmux -u` 双保险。
+func ensureUTF8Locale() {
+	utf8 := func(v string) bool {
+		u := strings.ToUpper(v)
+		return strings.Contains(u, "UTF-8") || strings.Contains(u, "UTF8")
+	}
+	if utf8(os.Getenv("LC_ALL")) || utf8(os.Getenv("LC_CTYPE")) || utf8(os.Getenv("LANG")) {
+		return // 已是 UTF-8,不动
+	}
+	_ = os.Setenv("LANG", "en_US.UTF-8")
 }
 
 // runServe parses serve flags (env-backed) and starts the control service.
@@ -107,8 +144,10 @@ func runConnect(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("connect", flag.ExitOnError)
 	noServe := fs.Bool("no-serve", false, "don't run the control service in-process; proxy the overlay to a separate `ccfly serve` (CCFLY_LOCAL_PORT, default 7699)")
 	claudeDir := fs.String("claude-dir", os.Getenv("CCFLY_CLAUDE_DIR"), "Claude projects dir for the in-process control service (default ~/.claude/projects)")
+	expose := fs.String("overlay-expose", os.Getenv("CCFLY_OVERLAY_EXPOSE"), "expose local TCP services on the overlay (exit side): 'overlayPort:localPort[@allowCIDR|...][,...]' (env CCFLY_OVERLAY_EXPOSE)")
+	forward := fs.String("overlay-forward", os.Getenv("CCFLY_OVERLAY_FORWARD"), "forward loopback ports to other nodes' overlay services (center side): 'localPort:overlayIP:port[,...]' (env CCFLY_OVERLAY_FORWARD)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly connect <host>[/<code>] [--no-serve] [--claude-dir <dir>]")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly connect <host>[/<code>] [--no-serve] [--claude-dir <dir>] [--overlay-expose ...] [--overlay-forward ...]")
 		fs.PrintDefaults()
 	}
 	if len(args) < 1 || args[0] == "" {
@@ -117,6 +156,13 @@ func runConnect(ctx context.Context, args []string) error {
 	}
 	target := args[0]
 	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+
+	if err := mesh.SetOverlayExpose(*expose); err != nil {
+		return err
+	}
+	if err := mesh.SetOverlayForward(*forward); err != nil {
 		return err
 	}
 
@@ -141,6 +187,9 @@ func runConnect(ctx context.Context, args []string) error {
 		srv := &http.Server{Handler: control.Handler()}
 		go func() { _ = srv.Serve(ln) }()
 		go func() { <-ctx.Done(); _ = srv.Close() }()
+		// 进程内路径用 Handler()(非 Serve),需在此显式起后台巡检 —— 否则生产默认部署
+		// (ccfly connect,经 cc.hn 反代)永远不跑回收/暖缓存。serve/connect 互斥,每进程恰一个。
+		go control.RunScanner(ctx)
 		mesh.SetLocalControlPort(port)
 		log.Printf("ccfly: control service (in-process) on 127.0.0.1:%d", port)
 	}
@@ -158,8 +207,10 @@ func runInstall(ctx context.Context, args []string) error {
 	system := fs.Bool("system", false, "system-wide service (needs sudo; survives logout/reboot)")
 	claudeDir := fs.String("claude-dir", "", "Claude projects dir (default ~/.claude/projects)")
 	dry := fs.Bool("dry-run", false, "print what would be done; change nothing")
+	expose := fs.String("overlay-expose", os.Getenv("CCFLY_OVERLAY_EXPOSE"), "bake an overlay expose into the service: 'overlayPort:localPort[@allowCIDR|...][,...]'")
+	forward := fs.String("overlay-forward", os.Getenv("CCFLY_OVERLAY_FORWARD"), "bake an overlay forward into the service: 'localPort:overlayIP:port[,...]'")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly install [<host>[/<code>]] [--system] [--claude-dir <dir>] [--dry-run]")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly install [<host>[/<code>]] [--system] [--claude-dir <dir>] [--overlay-forward ...] [--overlay-expose ...] [--dry-run]")
 		fs.PrintDefaults()
 	}
 	// flag 可放在 host 前后任意位置:先整体 parse 吃掉 host 前的 flag,取首个位置参数为 host,
@@ -194,7 +245,14 @@ func runInstall(ctx context.Context, args []string) error {
 			return fmt.Errorf("配对失败,未安装服务: %w", err)
 		}
 	}
-	return svc.Install(svc.Options{Target: target, System: *system, ClaudeDir: *claudeDir, DryRun: *dry})
+	var extra []string
+	if strings.TrimSpace(*forward) != "" {
+		extra = append(extra, "--overlay-forward", *forward)
+	}
+	if strings.TrimSpace(*expose) != "" {
+		extra = append(extra, "--overlay-expose", *expose)
+	}
+	return svc.Install(svc.Options{Target: target, System: *system, ClaudeDir: *claudeDir, DryRun: *dry, ExtraArgs: extra})
 }
 
 // runUninstall removes the persistent service.
@@ -230,6 +288,26 @@ Usage:
       --system = system-wide (sudo, survives logout). Default = user-level.
   ccfly uninstall [--system]
       Remove the service installed by "ccfly install".
+  ccfly ls [-a]
+      Directory-centric session overview: grouped by cwd, newest first; each
+      row ends with a copy-paste takeover command (live -> "tmux a -t <pane>",
+      offline -> "ccfly attach <sid8>"). Default shows the 5 most recent per
+      directory (live ones always shown); -a = all. ("ccfly list" is an alias.)
+  ccfly a [sid|sid8|cc-sid8]
+      Attach to a session in tmux ("ccfly attach" is an alias). With no
+      argument, opens an interactive picker: choose a project directory,
+      then a session (↑↓/jk move · Enter attach · ←/Esc back · r refresh ·
+      q quit). If the session is live, mirrors the existing pane; otherwise
+      kills any existing claude process for it (deterministic match only)
+      and recreates it inside tmux via "claude --resume" — the single-entry
+      path that prevents double writers.
+  ccfly new [dir]
+      Start a brand-new claude in a fresh tmux session (default: current dir).
+  ccfly panemap-hook
+      (internal) Claude Code SessionStart hook: records "tmux pane -> current
+      session id" into ~/.ccfly/panemap.json so the control service resolves
+      sessions to panes deterministically. Installed automatically into
+      ~/.claude/settings.json on startup; set CCFLY_NO_HOOK=1 to disable.
   ccfly version
   ccfly help
 
