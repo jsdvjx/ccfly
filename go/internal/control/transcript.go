@@ -112,13 +112,7 @@ func findMessageImage(sid, uuid string, idx int) (imageInfo, bool) {
 		return imageInfo{}, false
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024) // base64 图片行可能很大
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+	for line := range jsonlLines(f) { // 无上限逐行:大 base64 图片行不截断(见 jsonlLines)
 		var ev struct {
 			UUID    string `json:"uuid"`
 			Message *struct {
@@ -694,13 +688,7 @@ func readSessionInfo(path string) (infoResp, bool) {
 	defer f.Close()
 	var info infoResp
 	maxCtx := 0
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024) // 工具结果行可能很大
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+	for line := range jsonlLines(f) { // 无上限逐行(超大行不截断;见 jsonlLines)
 		var ev rawEvent
 		if json.Unmarshal(line, &ev) != nil {
 			continue

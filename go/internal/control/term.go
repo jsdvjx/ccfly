@@ -94,6 +94,10 @@ func handleTerm(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Accept 失败已写过响应
 	}
+	// 放宽单帧读上限:coder/websocket 默认 32KiB,而网页终端**粘贴一大段**(代码块/路径列表/长文)
+	// 会作为一个大 INPUT 帧到达,超 32KiB 即触发读错误 → 读循环退出 → 整个终端被拆掉(粘贴中途断)。
+	// 调到 8MiB:容下任何现实粘贴,又给一个上界防恶意巨帧撑内存。
+	c.SetReadLimit(8 << 20)
 	// 兜底关连接(正常路径下面会用更明确的状态码再关一次;重复关无害)。
 	defer c.CloseNow()
 

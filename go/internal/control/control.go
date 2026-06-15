@@ -33,6 +33,8 @@ package control
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -44,8 +46,25 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// imgBufSeq 是 imgBufferName 的进程内回退计数器(crypto/rand 失败时用,绝不退化成固定名)。
+var imgBufSeq atomic.Uint64
+
+// imgBufferName 为一次「带图原子提交」生成**唯一**的 tmux buffer 名。
+// 关键:tmux buffer 是 tmux server 全局的;若所有请求都用固定名 "ccfly-img",两个并发带图提交
+// (两个会话/两个标签页)会互相覆盖 buffer —— A 粘成 B 的图,或 -d(粘完即删)让另一个 paste-buffer
+// 报 "no buffer" 500 且输入行已半填。每次请求一个随机名即可消除跨请求竞争(同一请求内多图顺序复用同名无害)。
+func imgBufferName() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return "ccfly-img-" + hex.EncodeToString(b[:])
+	}
+	// 熵源故障:回退到进程内自增 + 纳秒,仍保证本进程内唯一(跨进程极罕见,聊胜于固定名)。
+	return "ccfly-img-" + strconv.FormatUint(imgBufSeq.Add(1), 36) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+}
 
 // bindIsLoopback 判定一个监听地址(host:port)是否仅绑回环。无法解析出明确回环 host 时
 // 一律按「非回环」处理(宁可多警告也不漏)。空 host(如 ":7699")= 绑全网卡,显然非回环。
@@ -251,9 +270,12 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 
 	// ── 图片原生附图:逐张「括号粘贴其绝对路径」──。对每张图:tmux set-buffer 把路径塞进一个具名
 	// buffer,再 paste-buffer -p(-p=括号粘贴,模拟拖拽)把它粘进里世界输入框;里世界即把这条
-	// 「粘进来的图片路径」原生嵌成 `[Image #N]`(不提交、不显路径、不走 Read)。-d 粘完即删该 buffer,
-	// 故所有图复用同一个 buffer 名。多图之间留一小段,确保里世界逐张吃进、序号(#1 #2 …)不串。
+	// 「粘进来的图片路径」原生嵌成 `[Image #N]`(不提交、不显路径、不走 Read)。-d 粘完即删该 buffer。
+	// buffer 名**每次请求唯一**(imgBufferName):tmux buffer 全局共享,固定名会让并发带图提交互相
+	// 覆盖(详见 imgBufferName 注释)。同一请求内多图顺序复用同一名无害。多图之间留一小段,确保里世界
+	// 逐张吃进、序号(#1 #2 …)不串。
 	// 注:imgPaths 均为 validateUploadPath 解出的绝对路径(必以 / 开头),故 set-buffer 直接传、无需 --。
+	imgBuf := imgBufferName()
 	//
 	// 里世界把括号粘贴进来的图片路径**异步**嵌成的实时占位串(本机实测 v2.1.168 = `[Image #1]`);
 	// 下面用它作「图已吃进」的就绪信号。注:这是**实时输入框**里的渲染形态,与落盘 transcript 的
@@ -269,11 +291,11 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for i, p := range imgPaths {
-		if out, err := exec.Command("tmux", "set-buffer", "-b", "ccfly-img", p).CombinedOutput(); err != nil {
+		if out, err := exec.Command("tmux", "set-buffer", "-b", imgBuf, p).CombinedOutput(); err != nil {
 			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
 			return
 		}
-		if out, err := exec.Command("tmux", "paste-buffer", "-p", "-d", "-b", "ccfly-img", "-t", sess).CombinedOutput(); err != nil {
+		if out, err := exec.Command("tmux", "paste-buffer", "-p", "-d", "-b", imgBuf, "-t", sess).CombinedOutput(); err != nil {
 			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
 			return
 		}

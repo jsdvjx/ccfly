@@ -20,7 +20,6 @@ package control
 //  4. 运行中 = 所有登记的 - 已出现终止信号的。
 
 import (
-	"bufio"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -84,15 +83,11 @@ func scanRunningAgents(sid string) ([]runningAgent, error) {
 }
 
 // scanRunningAgentsFrom 从 reader 逐行扫描(便于夹具测试)。
+// 无上限逐行(jsonlLines):超大行(工具结果/快照)不再被 bufio.Scanner 静默截断、吞掉其后所有行。
 func scanRunningAgentsFrom(r io.Reader) ([]runningAgent, error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024) // 工具结果/快照行可能很大
 	var lines []string
-	for sc.Scan() {
-		lines = append(lines, sc.Text())
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
+	for line := range jsonlLines(r) {
+		lines = append(lines, string(line))
 	}
 	return scanRunningAgentsFromLines(lines), nil
 }

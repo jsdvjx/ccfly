@@ -9,12 +9,46 @@ package control
 import (
 	"bufio"
 	"encoding/json"
+	"io"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
+
+// jsonlLines 以 \n 分隔逐行迭代 r,**行长无上限** —— 取代 bufio.Scanner。
+// 病灶:bufio.Scanner 的固定缓冲上限(本仓多处 16/64MB)在遇到超大行(内联 base64 图、巨型
+// 工具结果/快照)时**静默截断该行,且其后所有行都不可见**;多处旧代码还没查 sc.Err(),无从察觉
+// —— 结果是同一文件不同端点解析出的内容不一致、transcript/info/subagent/图片在某条大行后凭空消失。
+// 改用与 readTranscriptSteps 同口径的 bufio.Reader.ReadBytes:无上限,不会截断。
+//
+// 语义:行尾 \n/\r\n 已剥除;空行跳过;末尾无 \n 的半截行(正在追加写)也会产出,与旧 Scanner
+// 一致(调用方 json 解析失败自会跳过)。读到 EOF 或任何读错误即停止(本地可信文件,读错误极罕见;
+// 「遇错即止」与旧 Scanner 同行为)。yield 返回 false 即提前结束(找到即停,省去读完整个文件)。
+//
+// 取舍:无上限意味着一条 200MB 的行会整行读进内存(旧上限会丢弃)。源是用户本机 ~/.claude 可信
+// 数据,这是「正确优先于省内存」——宁可多占一次瞬时内存,也不静默吞掉那行之后的全部历史。
+func jsonlLines(r io.Reader) iter.Seq[[]byte] {
+	return func(yield func([]byte) bool) {
+		br := bufio.NewReader(r)
+		for {
+			line, err := br.ReadBytes('\n')
+			if n := len(line); n > 0 {
+				for n > 0 && (line[n-1] == '\n' || line[n-1] == '\r') {
+					n--
+				}
+				if n > 0 && !yield(line[:n]) {
+					return
+				}
+			}
+			if err != nil {
+				return // EOF 或读错:停止(末尾半截行上面已产出)
+			}
+		}
+	}
+}
 
 // claudeSnapshot 是单个 Claude 会话的进度快照(本地扫描用)。
 type claudeSnapshot struct {
@@ -167,13 +201,7 @@ func scanOneSession(path string) (claudeSnapshot, bool) {
 	defer fh.Close()
 
 	snap := claudeSnapshot{SessionID: strings.TrimSuffix(filepath.Base(path), ".jsonl")}
-	sc := bufio.NewScanner(fh)
-	sc.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024) // 行可能很大(工具结果/快照)
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
+	for line := range jsonlLines(fh) { // 无上限逐行(超大行不截断;见 jsonlLines)
 		var ev rawEvent
 		if json.Unmarshal(line, &ev) != nil {
 			continue
