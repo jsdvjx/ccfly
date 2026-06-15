@@ -476,10 +476,12 @@ func refreshConfig(ctx context.Context, st *State) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		log.Printf("ccfly: device config refresh failed: %v", err) // graceful: keep existing State
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("ccfly: device config refresh: HTTP %d", resp.StatusCode)
 		return
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -490,7 +492,8 @@ func refreshConfig(ctx context.Context, st *State) {
 		ProxyScheme    string `json:"proxy_scheme"`
 		ProxyCA        string `json:"proxy_ca"`
 	}
-	if json.Unmarshal(data, &c) != nil {
+	if err := json.Unmarshal(data, &c); err != nil {
+		log.Printf("ccfly: device config refresh: bad JSON: %v", err)
 		return
 	}
 	changed := false
