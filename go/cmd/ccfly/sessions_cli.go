@@ -24,6 +24,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/ccfly/ccfly/go/internal/control"
+	"github.com/ccfly/ccfly/go/internal/mesh"
 )
 
 // cliClaudeDir 解析 --claude-dir(与 serve/connect 同名同义)并注入 control。
@@ -221,6 +222,7 @@ func attachSid(sid string) error {
 			fmt.Fprintf(os.Stderr, "ccfly attach: killed existing claude process %v\n", res.Killed)
 		}
 	}
+	mesh.EnsureTmuxProxyEnv() // 据云端下发策略设好 CCFLY_TMUX_PROXY,CLIAttachArgs 据此注入会话
 	return execTmux(control.CLIAttachArgs(sid))
 }
 
@@ -241,7 +243,9 @@ func runNew(args []string) error {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
 	name := "cc-" + hex.EncodeToString(b)
-	// 代理环境注入(CCFLY_TMUX_PROXY 配了才有):新建会话默认带好代理 + 局域网 bypass。
+	// 代理环境注入:据云端下发并持久化的策略把 CCFLY_TMUX_PROXY 设好(用户已设则尊重),
+	// 新建会话默认带好代理 + 局域网 bypass。
+	mesh.EnsureTmuxProxyEnv()
 	targs := append([]string{"-u", "new-session"}, control.TmuxProxyEnvArgs()...)
 	targs = append(targs, "-A", "-s", name, "-c", cwd, "claude")
 	return execTmux(targs)

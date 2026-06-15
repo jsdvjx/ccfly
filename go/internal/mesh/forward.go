@@ -54,6 +54,22 @@ var (
 	forwardSpecs []forwardSpec
 )
 
+// addAutoForward 追加一条「云端下发的代理策略」自动转发(localPort → dstIP:dstPort),供
+// applyMeshProxy 用。幂等:同 localPort 已存在(用户用 --overlay-forward 配了 / 已加过)则跳过,
+// 不覆盖用户配置、也不重复。dstIP 解析失败 → 跳过(失败安全,绝不让入网因此失败)。
+func addAutoForward(localPort int, dstIP string, dstPort int) {
+	for _, f := range forwardSpecs {
+		if f.localPort == localPort {
+			return // 该本地端口已有转发(用户配的或已加过)→ 不动
+		}
+	}
+	dst, err := netip.ParseAddr(strings.TrimSpace(dstIP))
+	if err != nil {
+		return
+	}
+	forwardSpecs = append(forwardSpecs, forwardSpec{localPort: localPort, dst: dst, dstPort: dstPort})
+}
+
 // SetOverlayExpose parses a comma-separated expose list, replacing any prior
 // config. Each item is "overlayPort:localPort[@allowCIDR|allowCIDR|...]"; a bare
 // allow IP means a host (/32) rule. Empty input clears the config.
