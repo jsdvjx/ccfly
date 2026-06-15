@@ -26,6 +26,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 	"golang.zx2c4.com/wireguard/conn"
@@ -64,6 +65,10 @@ func SetControlProxyEnabled(on bool) { controlProxyEnabled = on }
 // maxWGFrameBytes caps a single inbound WS frame. WG MTU is 1420; this is
 // generous headroom while bounding memory per read.
 const maxWGFrameBytes = 64 * 1024
+
+// wgWriteTimeout 单条 WG datagram 写入 WS 的上限。背景 ctx 下写会永久阻塞、串行化地堵死整条
+// 发送路径(见 Send);超时即拆连触发重连。比 WG 重传节拍宽,正常发送绝不触及。
+const wgWriteTimeout = 10 * time.Second
 
 // allowedOverlayCIDR is the route the cloud peer owns on our overlay: the whole
 // 100.64.0.0/16 carrier-grade-NAT space ccfly assigns out of.
@@ -149,9 +154,15 @@ func (b *clientWSBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	if c == nil {
 		return nil
 	}
-	ctx := context.Background()
+	// 有界写超时(M3):背景 ctx 下 c.Write 在 TCP 发送缓冲写满 + 云端卡住时会**永远阻塞**;
+	// coder/websocket 写串行化,一个卡死的 Send 把后续所有 WG 握手/keepalive/数据全堵在后面
+	// → WS 还连着、overlay 数据不流(「在线却不通」)。超时即拆连,让 pump 读循环出错触发重连。
 	for _, pkt := range bufs {
-		if err := c.Write(ctx, websocket.MessageBinary, pkt); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), wgWriteTimeout)
+		err := c.Write(ctx, websocket.MessageBinary, pkt)
+		cancel()
+		if err != nil {
+			c.CloseNow() // 写失败/超时:主动拆连,别让死连接拖住数据面
 			return err
 		}
 	}
