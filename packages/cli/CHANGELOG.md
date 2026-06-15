@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.5.4
+
+### Patch Changes
+
+- Auto-trust the mesh exit's MITM CA. When the cloud advertises a proxy exit that bumps TLS (byway `-bump`), ccfly now receives the exit's CA bundle in its device config, writes it to `~/.ccfly/proxy-ca.pem`, and injects `NODE_EXTRA_CA_CERTS` into ccfly-created tmux sessions (`new`/`attach`/`/term`). Claude inside a session then reaches AI endpoints through the exit without any manual certificate setup. No-op when no proxy is advertised or when `CCFLY_TMUX_PROXY_CA` is already set.
+
 ## 0.4.10
 
 ### Patch Changes

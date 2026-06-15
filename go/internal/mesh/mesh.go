@@ -52,6 +52,9 @@ type State struct {
 	// 零配置自动起 127.0.0.1:<port> → cloud_overlay_ip:<port> 转发 + 给会话注入代理环境(见 applyMeshProxy)。
 	ProxyPort   int    `json:"proxy_port,omitempty"`
 	ProxyScheme string `json:"proxy_scheme,omitempty"`
+	// 出口若做 MITM,设备需信任其 CA。云端把所有出口的 CA 合成一个 PEM bundle 下发,设备落盘到
+	// ~/.ccfly/proxy-ca.pem 并给会话注入 NODE_EXTRA_CA_CERTS(见 applyProxyCA)。
+	ProxyCA string `json:"proxy_ca,omitempty"`
 }
 
 // connectResp mirrors ccfly-cloud's POST /connect response.
@@ -68,6 +71,7 @@ type connectResp struct {
 	KeepaliveSec   int    `json:"keepalive_sec"`
 	ProxyPort      int    `json:"proxy_port,omitempty"`
 	ProxyScheme    string `json:"proxy_scheme,omitempty"`
+	ProxyCA        string `json:"proxy_ca,omitempty"`
 }
 
 // Connect 把设备接入 <target> 并持有 mesh 隧道,直到 ctx 取消。target 形态:
@@ -128,6 +132,7 @@ func applyEnroll(st *State, resp *connectResp) error {
 	st.KeepaliveSec = resp.KeepaliveSec
 	st.ProxyPort = resp.ProxyPort     // 云端下发的代理策略,持久化:CLI(ccfly new/a)与下次重连都据此自动配
 	st.ProxyScheme = resp.ProxyScheme
+	st.ProxyCA = resp.ProxyCA         // 出口 MITM CA bundle,落盘+注入会话信任(见 applyProxyCA)
 	if err := saveState(st); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
@@ -426,6 +431,26 @@ func applyMeshProxy(st *State) {
 		}
 		_ = os.Setenv("CCFLY_TMUX_PROXY", fmt.Sprintf("%s://127.0.0.1:%d", scheme, st.ProxyPort))
 	}
+	applyProxyCA(st.ProxyCA)
+}
+
+// applyProxyCA 把云端下发的「出口 MITM CA bundle」落盘到 ~/.ccfly/proxy-ca.pem,并把
+// CCFLY_TMUX_PROXY_CA 指向它 —— proxyenv 据此给会话注入 NODE_EXTRA_CA_CERTS,使会话里的
+// claude(Node)信任 MITM 出口的证书,否则经出口的 HTTPS 会证书校验失败。
+// 空 CA / 用户已显式设 CCFLY_TMUX_PROXY_CA → no-op(尊重用户、零行为变化)。
+func applyProxyCA(caPEM string) {
+	if caPEM == "" || os.Getenv("CCFLY_TMUX_PROXY_CA") != "" {
+		return
+	}
+	dir, err := stateDir()
+	if err != nil {
+		return
+	}
+	path := filepath.Join(dir, "proxy-ca.pem")
+	if err := os.WriteFile(path, []byte(caPEM), 0o644); err != nil {
+		return
+	}
+	_ = os.Setenv("CCFLY_TMUX_PROXY_CA", path)
 }
 
 // refreshConfig 在连接/重连前向云端拉一次「动态配置」(GET /api/device/config,凭 mesh_token),
@@ -463,6 +488,7 @@ func refreshConfig(ctx context.Context, st *State) {
 		CloudOverlayIP string `json:"cloud_overlay_ip"`
 		ProxyPort      int    `json:"proxy_port"`
 		ProxyScheme    string `json:"proxy_scheme"`
+		ProxyCA        string `json:"proxy_ca"`
 	}
 	if json.Unmarshal(data, &c) != nil {
 		return
@@ -479,6 +505,9 @@ func refreshConfig(ctx context.Context, st *State) {
 	}
 	if c.ProxyScheme != st.ProxyScheme {
 		st.ProxyScheme, changed = c.ProxyScheme, true
+	}
+	if c.ProxyCA != st.ProxyCA {
+		st.ProxyCA, changed = c.ProxyCA, true
 	}
 	if changed {
 		_ = saveState(st)
@@ -670,6 +699,7 @@ func EnsureTmuxProxyEnv() {
 			scheme = "http"
 		}
 		_ = os.Setenv("CCFLY_TMUX_PROXY", fmt.Sprintf("%s://127.0.0.1:%d", scheme, st.ProxyPort))
+		applyProxyCA(st.ProxyCA) // 同步落盘 CA + 设 CCFLY_TMUX_PROXY_CA,供 proxyenv 注入会话信任
 		return
 	}
 }

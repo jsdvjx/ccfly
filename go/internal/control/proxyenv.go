@@ -40,9 +40,16 @@ func tmuxProxyEnvArgs() []string {
 		{"HTTP_PROXY", proxy}, {"HTTPS_PROXY", proxy}, {"ALL_PROXY", proxy},
 		{"no_proxy", noProxy}, {"NO_PROXY", noProxy},
 	}
-	args := make([]string, 0, len(kv)*2)
+	args := make([]string, 0, len(kv)*2+2)
 	for _, p := range kv {
 		args = append(args, "-e", p[0]+"="+p[1]) // tmux 直接按 argv 取值,URL 的 :// 无需转义
+	}
+	// 出口若做 MITM(byway -bump),会话里的 claude 经代理访问 AI 会撞到出口重签的证书 —— 默认信任库
+	// 不认 → TLS 校验失败。CCFLY_TMUX_PROXY_CA 指向云端下发并落盘的出口 CA bundle(见 mesh.applyProxyCA),
+	// 注入 NODE_EXTRA_CA_CERTS(Node/claude code 用,且是**叠加**信任、不会顶掉系统根证书)。仅在配了
+	// 代理时才注入(无代理则无需信任出口 CA)。
+	if ca := strings.TrimSpace(os.Getenv("CCFLY_TMUX_PROXY_CA")); ca != "" {
+		args = append(args, "-e", "NODE_EXTRA_CA_CERTS="+ca)
 	}
 	return args
 }
