@@ -428,8 +428,67 @@ func applyMeshProxy(st *State) {
 	}
 }
 
+// refreshConfig 在连接/重连前向云端拉一次「动态配置」(GET /api/device/config,凭 mesh_token),
+// 更新并落盘 State 的 cloud_public_key / cloud_overlay_ip / proxy 策略。
+// 关键价值:**保存身份重连的设备不重新 enroll**,云端后来才下发的 proxy_port、或轮换后的
+// cloud_public_key,本来永远拿不到(只能手动改 State 或重新配对)。本函数让设备每次连接主动刷新,
+// 真正做到「策略默认就生效、无需显式操作」,并顺带自愈 cloud 公钥漂移导致的数据面不通。
+// 云端老版本(无此端点)/ 网络失败 → 静默沿用现有 State(优雅降级,绝不阻断连接)。
+func refreshConfig(ctx context.Context, st *State) {
+	if st.MeshToken == "" || st.Host == "" {
+		return
+	}
+	scheme := st.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(rctx, "GET",
+		scheme+"://"+st.Host+"/api/device/config?token="+url.QueryEscape(st.MeshToken), nil)
+	if err != nil {
+		return
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var c struct {
+		CloudPublicKey string `json:"cloud_public_key"`
+		CloudOverlayIP string `json:"cloud_overlay_ip"`
+		ProxyPort      int    `json:"proxy_port"`
+		ProxyScheme    string `json:"proxy_scheme"`
+	}
+	if json.Unmarshal(data, &c) != nil {
+		return
+	}
+	changed := false
+	if c.CloudPublicKey != "" && c.CloudPublicKey != st.CloudPublicKey {
+		st.CloudPublicKey, changed = c.CloudPublicKey, true
+	}
+	if c.CloudOverlayIP != "" && c.CloudOverlayIP != st.CloudOverlayIP {
+		st.CloudOverlayIP, changed = c.CloudOverlayIP, true
+	}
+	if c.ProxyPort != st.ProxyPort {
+		st.ProxyPort, changed = c.ProxyPort, true
+	}
+	if c.ProxyScheme != st.ProxyScheme {
+		st.ProxyScheme, changed = c.ProxyScheme, true
+	}
+	if changed {
+		_ = saveState(st)
+		log.Printf("ccfly: refreshed device config (proxy_port=%d cloud_pub=%.8s…)", st.ProxyPort, st.CloudPublicKey)
+	}
+}
+
 func runTunnel(ctx context.Context, st *State) error {
-	applyMeshProxy(st) // 入网/重连前一次性:据云端下发的代理策略自动起转发 + 设会话代理环境(见上)
+	refreshConfig(ctx, st) // 拉云端动态配置(proxy 策略 + cloud 公钥):保存身份重连的设备也能更新,无需重新配对
+	applyMeshProxy(st)     // 据(可能刚刷新的)proxy 策略自动起转发 + 设会话代理环境(见上)
 	backoff := time.Second
 	for ctx.Err() == nil {
 		err := dialOnce(ctx, st)
