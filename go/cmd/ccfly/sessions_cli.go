@@ -241,7 +241,10 @@ func runNew(args []string) error {
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
 	name := "cc-" + hex.EncodeToString(b)
-	return execTmux([]string{"-u", "new-session", "-A", "-s", name, "-c", cwd, "claude"})
+	// 代理环境注入(CCFLY_TMUX_PROXY 配了才有):新建会话默认带好代理 + 局域网 bypass。
+	targs := append([]string{"-u", "new-session"}, control.TmuxProxyEnvArgs()...)
+	targs = append(targs, "-A", "-s", name, "-c", cwd, "claude")
+	return execTmux(targs)
 }
 
 // execTmux 以 exec 替换自身为 tmux 客户端(接管 TTY;退出码/信号语义同手敲 tmux)。

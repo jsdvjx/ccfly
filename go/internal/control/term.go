@@ -143,7 +143,9 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 
 	// 2) 起 tmux(在 PTY 里),attach-or-create 同名会话 → 与本地/其它端实时镜像。
 	// -u:强制把客户端当 UTF-8(否则最小环境下 tmux 客户端 utf8=0,会把中文/符号降级成 '_')。
-	args := []string{"-u", "new-session", "-A", "-s", sess}
+	// 代理环境注入(CCFLY_TMUX_PROXY 配了才有):新建会话默认带好代理 + 局域网 bypass(见 proxyenv.go)。
+	args := append([]string{"-u", "new-session"}, tmuxProxyEnvArgs()...)
+	args = append(args, "-A", "-s", sess)
 	if cwd != "" {
 		args = append(args, "-c", cwd)
 	}

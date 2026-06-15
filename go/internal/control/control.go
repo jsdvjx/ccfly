@@ -525,7 +525,9 @@ func handleStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	args := []string{"-u", "new-session", "-d", "-s", sess} // -u:UTF-8 客户端(防中文/符号被降级成 '_')
+	// -u:UTF-8 客户端(防中文/符号被降级成 '_');-e 代理环境注入(CCFLY_TMUX_PROXY 配了才有,见 proxyenv.go)。
+	args := append([]string{"-u", "new-session", "-d"}, tmuxProxyEnvArgs()...)
+	args = append(args, "-s", sess)
 	if req.Cwd != "" {
 		args = append(args, "-c", req.Cwd)
 	}
