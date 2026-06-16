@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.5.6
+
+### Patch Changes
+
+- 3528580: The embedded web UI now renders `AskUserQuestion` with a dedicated, unfolded card — question header, all options (with the chosen one highlighted), and the selected answer shown inline — instead of a collapsed generic JSON dump that hid the answer.
+
 ## 0.5.5
 
 ### Patch Changes
