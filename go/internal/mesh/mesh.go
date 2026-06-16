@@ -130,9 +130,9 @@ func applyEnroll(st *State, resp *connectResp) error {
 	st.MeshURL = resp.MeshURL
 	st.MeshToken = resp.MeshToken
 	st.KeepaliveSec = resp.KeepaliveSec
-	st.ProxyPort = resp.ProxyPort     // 云端下发的代理策略,持久化:CLI(ccfly new/a)与下次重连都据此自动配
+	st.ProxyPort = resp.ProxyPort // 云端下发的代理策略,持久化:CLI(ccfly new/a)与下次重连都据此自动配
 	st.ProxyScheme = resp.ProxyScheme
-	st.ProxyCA = resp.ProxyCA         // 出口 MITM CA bundle,落盘+注入会话信任(见 applyProxyCA)
+	st.ProxyCA = resp.ProxyCA // 出口 MITM CA bundle,落盘+注入会话信任(见 applyProxyCA)
 	if err := saveState(st); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
@@ -418,6 +418,7 @@ func openBrowser(rawURL string) {
 //     localPort 则不重复加);
 //  2. 给 ccfly 创建的 tmux 会话设 CCFLY_TMUX_PROXY=<scheme>://127.0.0.1:<port>(+ 默认局域网 bypass),
 //     让会话里 claude 及子进程出网走代理、本机/局域网直连。
+//
 // 用户若已手动设了 CCFLY_TMUX_PROXY(服务 env / shell),尊重其值不覆盖。ProxyPort==0(云端未下发)→ no-op。
 func applyMeshProxy(st *State) {
 	if st == nil || st.ProxyPort <= 0 || st.CloudOverlayIP == "" {
@@ -521,6 +522,7 @@ func refreshConfig(ctx context.Context, st *State) {
 func runTunnel(ctx context.Context, st *State) error {
 	refreshConfig(ctx, st) // 拉云端动态配置(proxy 策略 + cloud 公钥):保存身份重连的设备也能更新,无需重新配对
 	applyMeshProxy(st)     // 据(可能刚刷新的)proxy 策略自动起转发 + 设会话代理环境(见上)
+	go runSyncer(ctx, st)  // 后台把本地会话(摘要 + 全文)同步到云端归档;走公网控制面,与隧道状态无关
 	backoff := time.Second
 	for ctx.Err() == nil {
 		err := dialOnce(ctx, st)
