@@ -342,13 +342,19 @@ func CLISessions() ([]CLISessionRow, error) {
 
 // CLIAttachArgs 给 ccfly attach:返回 tmux 参数(new-session -A,必要时注入 claude --resume)。
 // 复用 /term 的 resume 注入逻辑(claudeResumeCmd),行为与 web 端完全一致。
-func CLIAttachArgs(sid string) []string {
+// claudeArgs 是追加到 `claude --resume <sid>` 后的额外参数(如 --permission-mode plan /
+// --dangerously-skip-permissions);仅在「离线 resume 重建」时生效——会话已 live 时 -A 只 attach、
+// 忽略命令,claude 已在跑改不了权限模式。
+func CLIAttachArgs(sid string, claudeArgs []string) []string {
 	name := defaultTmuxName(sid)
 	// 代理环境注入(CCFLY_TMUX_PROXY 配了才有):新建会话默认带好代理 + 局域网 bypass。
 	args := append([]string{"-u", "new-session"}, tmuxProxyEnvArgs()...)
 	args = append(args, "-A", "-s", name)
 	if snaps, err := scanClaudeSessions(); err == nil {
 		if cmd, cwd, ok := claudeResumeCmd(name, snaps); ok {
+			if len(claudeArgs) > 0 {
+				cmd += " " + strings.Join(claudeArgs, " ")
+			}
 			if cwd != "" {
 				args = append(args, "-c", cwd)
 			}

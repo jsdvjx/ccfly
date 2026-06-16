@@ -33,6 +33,51 @@ func cliClaudeDir(fs *flag.FlagSet) *string {
 		"Claude projects dir (env CCFLY_CLAUDE_DIR; default ~/.claude/projects)")
 }
 
+// sessionOpts 是新建/恢复会话时透传给 claude 的权限选项(new / attach / picker 共用)。
+type sessionOpts struct {
+	skipPerms bool   // → --dangerously-skip-permissions(跳过所有权限确认)
+	permMode  string // → --permission-mode <mode>;"" 表示不传(用 claude 默认)
+}
+
+// permModes 是 claude --permission-mode 接受的取值;picker 的 'p' 也按此顺序循环。
+var permModes = []string{"default", "acceptEdits", "plan", "bypassPermissions"}
+
+// addPermFlags 给一个 FlagSet 注册权限相关 flag,返回承接其值的 sessionOpts。
+func addPermFlags(fs *flag.FlagSet) *sessionOpts {
+	o := &sessionOpts{}
+	fs.BoolVar(&o.skipPerms, "dangerously-skip-permissions", false,
+		"pass --dangerously-skip-permissions to claude (skip ALL permission prompts)")
+	fs.BoolVar(&o.skipPerms, "yolo", false, "alias of --dangerously-skip-permissions")
+	fs.StringVar(&o.permMode, "permission-mode", "",
+		"pass --permission-mode to claude: default|acceptEdits|plan|bypassPermissions")
+	return o
+}
+
+// validate 校验 permission-mode 取值(空 = 不传,合法)。
+func (o sessionOpts) validate() error {
+	if o.permMode == "" {
+		return nil
+	}
+	for _, m := range permModes {
+		if o.permMode == m {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid --permission-mode %q (want %s)", o.permMode, strings.Join(permModes, "|"))
+}
+
+// claudeArgs 把选项展开成追加到 claude 的命令行参数。skip 优先(它等价 bypassPermissions);
+// permMode 为空或 default 不传(用 claude 缺省行为)。
+func (o sessionOpts) claudeArgs() []string {
+	if o.skipPerms {
+		return []string{"--dangerously-skip-permissions"}
+	}
+	if o.permMode != "" && o.permMode != "default" {
+		return []string{"--permission-mode", o.permMode}
+	}
+	return nil
+}
+
 // dirGroup — ccfly ls 的一个目录组:该 cwd 下的全部会话(组内已按最近活动倒序)。
 type dirGroup struct {
 	Cwd  string
@@ -168,24 +213,33 @@ func runList(args []string) error {
 func runAttach(args []string) error {
 	fs := flag.NewFlagSet("attach", flag.ExitOnError)
 	dir := cliClaudeDir(fs)
+	opts := addPermFlags(fs)
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly a [sid|sid8|cc-sid8]  (无参 = 交互式选择)")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly a [--permission-mode <m>] [--dangerously-skip-permissions] [sid|sid8|cc-sid8]")
+		fmt.Fprintln(os.Stderr, "  无参 = 交互式选择器(可接管已有会话、也可新建)")
 		fs.PrintDefaults()
 	}
 	_ = fs.Parse(args)
+	if err := opts.validate(); err != nil {
+		return err
+	}
 	if *dir != "" {
 		control.SetClaudeDir(*dir)
 	}
 	if fs.NArg() < 1 {
-		// 无参:进 TUI 选择器。返回时终端已恢复,可安全 exec tmux。
-		sid, err := runPicker()
+		// 无参:进 TUI 选择器(可接管或新建,权限选项可现场切)。返回时终端已恢复,可安全 exec tmux。
+		res, err := runPicker(*opts)
 		if err != nil {
 			return err
 		}
-		if sid == "" {
+		switch res.action {
+		case pickAttach:
+			return attachSid(res.sid, res.opts.claudeArgs())
+		case pickNew:
+			return newSession(res.dir, res.opts)
+		default:
 			return nil // 用户退出,无声结束
 		}
-		return attachSid(sid)
 	}
 
 	rows, err := control.CLISessions()
@@ -196,11 +250,12 @@ func runAttach(args []string) error {
 	if sid == "" {
 		return fmt.Errorf("unknown or ambiguous session: %s (try `ccfly ls`)", fs.Arg(0))
 	}
-	return attachSid(sid)
+	return attachSid(sid, opts.claudeArgs())
 }
 
 // attachSid — 接管一个已解析的完整 sid(attach 的唯一落点,防双写语义在此)。
-func attachSid(sid string) error {
+// claudeArgs 仅在「离线 resume 重建」时生效(live 会话只 attach,claude 已在跑)。
+func attachSid(sid string, claudeArgs []string) error {
 	rows, err := control.CLISessions()
 	if err != nil {
 		return err
@@ -223,7 +278,7 @@ func attachSid(sid string) error {
 		}
 	}
 	mesh.EnsureTmuxProxyEnv() // 据云端下发策略设好 CCFLY_TMUX_PROXY,CLIAttachArgs 据此注入会话
-	return execTmux(control.CLIAttachArgs(sid))
+	return execTmux(control.CLIAttachArgs(sid, claudeArgs))
 }
 
 // runNew — ccfly new [dir]:新 tmux 会话里起全新 claude(默认当前目录)。
@@ -232,13 +287,27 @@ func attachSid(sid string) error {
 func runNew(args []string) error {
 	fs := flag.NewFlagSet("new", flag.ExitOnError)
 	_ = cliClaudeDir(fs) // 接受同名 flag(new 本身不读盘,保持口径一致)
+	opts := addPermFlags(fs)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: ccfly new [--permission-mode <m>] [--dangerously-skip-permissions] [dir]")
+		fs.PrintDefaults()
+	}
 	_ = fs.Parse(args)
+	if err := opts.validate(); err != nil {
+		return err
+	}
 	cwd := "."
 	if fs.NArg() > 0 {
 		cwd = fs.Arg(0)
 	}
-	if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
-		return fmt.Errorf("not a directory: %s", cwd)
+	return newSession(cwd, *opts)
+}
+
+// newSession 在 dir 里起一个全新 claude 会话(带权限选项),exec 接管当前 TTY。
+// runNew(CLI)与 picker 的「＋新建会话」共用同一落点。
+func newSession(dir string, opts sessionOpts) error {
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return fmt.Errorf("not a directory: %s", dir)
 	}
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
@@ -247,7 +316,10 @@ func runNew(args []string) error {
 	// 新建会话默认带好代理 + 局域网 bypass。
 	mesh.EnsureTmuxProxyEnv()
 	targs := append([]string{"-u", "new-session"}, control.TmuxProxyEnvArgs()...)
-	targs = append(targs, "-A", "-s", name, "-c", cwd, "claude")
+	// claude 命令拼成单个 shell 串(权限参数取值受控:enum mode / 固定 flag,无注入风险),
+	// 与 CLIAttachArgs 的 resume 命令口径一致(tmux 单参 = 交 shell 跑)。
+	claudeCmd := strings.Join(append([]string{"claude"}, opts.claudeArgs()...), " ")
+	targs = append(targs, "-A", "-s", name, "-c", dir, claudeCmd)
 	return execTmux(targs)
 }
 
