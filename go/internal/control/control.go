@@ -609,8 +609,10 @@ func handleNew(w http.ResponseWriter, r *http.Request) {
 		ctrlErr(w, 400, err.Error())
 		return
 	}
+	trustFolder(cwd) // 用户显式选了此目录 → 预信任,跳过「信任此文件夹」对话框(否则挡住 SessionStart)
 	name := newTmuxName()
 	args := append([]string{"-u", "new-session", "-d"}, tmuxProxyEnvArgs()...)
+	args = append(args, sandboxEnvArgs(req.SkipPerms)...) // root + skip-permissions → IS_SANDBOX=1 放行
 	args = append(args, "-s", name, "-c", cwd, "claude"+suffix)
 	if out, e := exec.Command("tmux", args...).CombinedOutput(); e != nil {
 		ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+e.Error()+")")
@@ -641,6 +643,71 @@ func newTmuxName() string {
 	}
 	return "cc-" + hex.EncodeToString(b)
 }
+
+// sandboxEnvArgs 在「以 root 跑 + 用了 --dangerously-skip-permissions」时返回 tmux 的
+// `-e IS_SANDBOX=1`。Claude Code 默认拒绝 root 下的 skip-permissions(安全保护:报
+// "cannot be used with root/sudo privileges"),IS_SANDBOX=1 是其文档化的放行开关。
+// 非 root 无需(skip 原生可用),不注入以免改变行为。tmux 服务端以本进程同一用户跑,故
+// os.Geteuid() 即将来 claude 的 uid。
+func sandboxEnvArgs(skip bool) []string {
+	if skip && os.Geteuid() == 0 {
+		return []string{"-e", "IS_SANDBOX=1"}
+	}
+	return nil
+}
+
+// SandboxEnvArgs 导出给 cmd/ccfly(ccfly new / picker 的 newSession)复用同一判定。
+func SandboxEnvArgs(skip bool) []string { return sandboxEnvArgs(skip) }
+
+// trustFolder 把 dir 预登记为 Claude Code 已信任(~/.claude.json 的
+// projects[abs].hasTrustDialogAccepted=true),让 ccfly 新建的会话跳过「是否信任此文件夹」对话框
+// —— 用户经目录浏览器显式选了该目录,即已表达信任,免掉那次点击(否则对话框会挡住 SessionStart)。
+// 全程失败安全:读不到 / 解析失败 / 写失败都不动原文件,绝不损坏 claude 主配置;原子写(临时文件 + rename)。
+func trustFolder(dir string) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	path := filepath.Join(home, ".claude.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // 没有就算了(claude 首启会自建)
+	}
+	var doc map[string]any
+	if json.Unmarshal(data, &doc) != nil {
+		return // 解析不了 → 绝不改写,避免损坏
+	}
+	projects, ok := doc["projects"].(map[string]any)
+	if !ok || projects == nil {
+		projects = map[string]any{}
+		doc["projects"] = projects
+	}
+	proj, ok := projects[abs].(map[string]any)
+	if !ok || proj == nil {
+		proj = map[string]any{}
+		projects[abs] = proj
+	}
+	if t, _ := proj["hasTrustDialogAccepted"].(bool); t {
+		return // 已信任,无需改写
+	}
+	proj["hasTrustDialogAccepted"] = true
+	out, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := path + ".ccfly-trust-tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path) // 原子替换
+}
+
+// TrustFolder 导出给 cmd/ccfly(newSession)复用。
+func TrustFolder(dir string) { trustFolder(dir) }
 
 // claudePermSuffix 把权限选项展开成追加到 `claude` 的命令行后缀(校验 permission_mode 取值)。
 func claudePermSuffix(skip bool, mode string) (string, error) {

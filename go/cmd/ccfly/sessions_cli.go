@@ -318,6 +318,7 @@ func newSession(dir string, opts sessionOpts) error {
 	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
 		return fmt.Errorf("not a directory: %s", dir)
 	}
+	control.TrustFolder(dir) // 用户显式选了此目录 → 预信任,跳过「信任此文件夹」对话框
 	b := make([]byte, 4)
 	_, _ = rand.Read(b)
 	name := "cc-" + hex.EncodeToString(b)
@@ -325,6 +326,7 @@ func newSession(dir string, opts sessionOpts) error {
 	// 新建会话默认带好代理 + 局域网 bypass。
 	mesh.EnsureTmuxProxyEnv()
 	targs := append([]string{"-u", "new-session"}, control.TmuxProxyEnvArgs()...)
+	targs = append(targs, control.SandboxEnvArgs(opts.skipPerms)...) // root + skip-permissions → IS_SANDBOX=1 放行
 	// claude 命令拼成单个 shell 串(权限参数取值受控:enum mode / 固定 flag,无注入风险),
 	// 与 CLIAttachArgs 的 resume 命令口径一致(tmux 单参 = 交 shell 跑)。
 	claudeCmd := strings.Join(append([]string{"claude"}, opts.claudeArgs()...), " ")

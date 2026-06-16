@@ -347,8 +347,15 @@ func CLISessions() ([]CLISessionRow, error) {
 // 忽略命令,claude 已在跑改不了权限模式。
 func CLIAttachArgs(sid string, claudeArgs []string) []string {
 	name := defaultTmuxName(sid)
+	skip := false
+	for _, a := range claudeArgs {
+		if a == "--dangerously-skip-permissions" {
+			skip = true
+		}
+	}
 	// 代理环境注入(CCFLY_TMUX_PROXY 配了才有):新建会话默认带好代理 + 局域网 bypass。
 	args := append([]string{"-u", "new-session"}, tmuxProxyEnvArgs()...)
+	args = append(args, sandboxEnvArgs(skip)...) // root + skip-permissions → IS_SANDBOX=1 放行
 	args = append(args, "-A", "-s", name)
 	if snaps, err := scanClaudeSessions(); err == nil {
 		if cmd, cwd, ok := claudeResumeCmd(name, snaps); ok {
