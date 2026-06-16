@@ -1,0 +1,30 @@
+[38;5;174m│[39m   [38;5;246mnnjs@y.ke's Organization[39m                         [2m[38;5;174m│[0m Nested `.cla… [38;5;174m│
+│[39m             [38;5;246m/private/tmp/ccfly-fxtest[39m              [2m[38;5;174m│[0m [3m[38;5;246m/release-not…[0m [38;5;174m│
+╰────────────────────────────────────────────────────────────────────╯
+
+[39m  [38;5;220m1 setup issue: keybindings[38;5;246m · /doctor[39m
+
+[38;5;239m[48;5;237m❯ [38;5;231mRun this exact shell command via the Bash tool, nothing else: echo [39m
+[38;5;153m[49m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+[39m   [1m[38;5;153mSelect model[0m
+   [38;5;246mSwitch between Claude models. Your pick becomes the default for [39m
+   [38;5;246mnew sessions. For other/previous model names, specify with [39m
+   [38;5;246m--model.[39m
+
+   [38;5;153m❯[39m [38;5;246m1. [38;5;114mDefault (recommended)[39m [38;5;114m✔[39m  [38;5;246mOpus 4.8 with 1M context · Best [39m
+                                 [38;5;246mfor everyday, complex tasks[39m
+     [38;5;246m2. [39mOpus                     [38;5;246mOpus 4.8 with 1M context · Best [39m
+                                 [38;5;246mfor everyday, complex tasks[39m
+     [38;5;246m3. [39mSonnet                   [38;5;246mSonnet 4.6 · Efficient for routine[39m
+                                 [38;5;246mtasks[39m
+     [38;5;246m4. [39mHaiku                    [38;5;246mHaiku 4.5 · Fastest for quick [39m
+                                 [38;5;246manswers[39m
+     [38;5;246m5. Fable (disabled)[39m         [38;5;246mClaude [38;5;174mFable 5[38;5;246m is currently [39m
+                                 [38;5;246munavailable. Learn more: [39m
+                                 [38;5;246mhttps://www.anthropic.com/news/fab[39m
+                                 [38;5;246mle-mythos-access[39m
+
+   [38;5;174m◉[38;5;246m xHigh effort [38;5;239m←/→ to adjust[39m
+
+   [38;5;246mEnter to set as default · s to use this session only · Esc to [39m
+   [38;5;246mcancel[39m

@@ -1,0 +1,30 @@
+│   nnjs@y.ke's Organization                         │ Nested `.cla… │
+│             /private/tmp/ccfly-fxtest              │ /release-not… │
+╰────────────────────────────────────────────────────────────────────╯
+
+  1 setup issue: keybindings · /doctor
+
+❯ Run this exact shell command via the Bash tool, nothing else: echo
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for
+   new sessions. For other/previous model names, specify with
+   --model.
+
+   ❯ 1. Default (recommended) ✔  Opus 4.8 with 1M context · Best
+                                 for everyday, complex tasks
+     2. Opus                     Opus 4.8 with 1M context · Best
+                                 for everyday, complex tasks
+     3. Sonnet                   Sonnet 4.6 · Efficient for routine
+                                 tasks
+     4. Haiku                    Haiku 4.5 · Fastest for quick
+                                 answers
+     5. Fable (disabled)         Claude Fable 5 is currently
+                                 unavailable. Learn more:
+                                 https://www.anthropic.com/news/fab
+                                 le-mythos-access
+
+   ◉ xHigh effort ←/→ to adjust
+
+   Enter to set as default · s to use this session only · Esc to
+   cancel

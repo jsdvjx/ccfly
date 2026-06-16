@@ -6,21 +6,15 @@
 //
 // 与旧 livestate.ts / ctrlstate.go 的根本差别:读屏【带属性】(反显 / 非默认底色),
 // 当前项 cur 不再只认 ❯ 字形 —— 这是头号 bug(F1:无字形高亮 → 整菜单被丢)的修复点。
-import { Terminal } from '@xterm/xterm'
+import type { Terminal } from '@xterm/xterm'
 import { liveTermHandle } from '../liveconn'
 import { tmuxName, sendKeys, type SendResult } from '../api'
+// 忠实帧 / 特征解析器抽到纯模块 ./pre(零 xterm/React,可单测;state-engine.md §3「one parser」)。
+import { type Cell, type Frame, type Ctx, BLANK, preFrame } from './pre'
 
-// ── 忠实帧:带属性的单元格网格(只留当前态需要的最小见证:inverse / 非默认底色)──
-export interface Cell { char: string; inverse: boolean; dim: boolean; bold: boolean; bgDefault: boolean; width: number }
-export interface Frame {
-  rows: number
-  cols: number
-  cells: Cell[][]
-  cursor: { row: number; col: number }
-  text(row: number): string
-}
-
-const BLANK: Cell = { char: ' ', inverse: false, dim: false, bold: false, bgDefault: true, width: 1 }
+// 帧 / 特征类型与 preFrame 从纯模块 ./pre re-export,保持既有 `from '../engine'` 的 import 路径不变。
+export { preFrame } from './pre'
+export type { Cell, Frame, FramePre, PreOption, Ctx } from './pre'
 
 // 读 xterm 的 buffer.active(可见屏,baseY 起),逐格保留 char + inverse/dim/bold + 底色是否默认。
 export function captureFrame(term: Terminal): Frame {
@@ -52,70 +46,7 @@ export function captureFrame(term: Terminal): Frame {
   return { rows, cols, cells, cursor: { row: buf.cursorY, col: buf.cursorX }, text }
 }
 
-// ── pre:对帧的一次性特征提取(只放特征,不放结论)。所有 resolve 共读,避免重复运算。──
-export interface PreOption { num: number | null; label: string; rows: number[]; cur: boolean; checked?: boolean }
-export interface FramePre { options: PreOption[]; footer: string | null; isBusy: boolean; inputBox: boolean; effort: string | null; title: string }
-export interface Ctx { frame: Frame; pre: FramePre }
-
-// g1=游标字形 g2=编号 g3=复选框字形(可空,多选菜单独有) g4=标签
-const RE_OPT = /^\s*(❯|›|>)?\s*(\d+)[.)]\s+([◯◉○●☑■□◻◼]|\[[ xX✔]?\])?\s*(\S.*?)\s*$/
-// 力度行:含 "effort" + 箭头提示 + "adjust"(如 "◉ medium effort  ←/→ to adjust")。捕获力度短语。
-const RE_EFFORT = /(\S[^←<]*?effort[^←<]*?)\s*(?:←|<).*?adjust/i
-
-export function preFrame(frame: Frame): FramePre {
-  const options: PreOption[] = []
-  for (let y = 0; y < frame.rows; y++) {
-    const m = RE_OPT.exec(frame.text(y))
-    if (!m) continue // 先判「像不像选项」,再谈高亮 —— /compact 进度条、力度条不会被误当选项
-    const cur = !!m[1] || rowHighlighted(frame.cells[y] || []) // F1:cur = ❯ 字形 或 整行被属性高亮
-    let checked: boolean | undefined
-    if (m[3]) checked = /[◉●☑■◼]|\[[xX✔]\]/.test(m[3]) // 实心/勾=选中,空框=未选;无复选框字形→undefined(单选)
-    options.push({ num: Number(m[2]), label: m[4], rows: [y], cur, checked })
-  }
-  const tail: string[] = []
-  for (let y = Math.max(0, frame.rows - 8); y < frame.rows; y++) tail.push(frame.text(y))
-  const footer = tail.slice(-6).find((t) => /(esc|enter)\b.*\bto\b|←\/→/i.test(t)) ?? null
-  const isBusy = tail.some((t) => /esc to interrupt/i.test(t))
-  let inputBox = false
-  for (let y = 0; y < frame.rows; y++)
-    if (/^─{6,}\s*$/.test(frame.text(y))) {
-      inputBox = true
-      break
-    }
-  let effort: string | null = null
-  for (let y = 0; y < frame.rows; y++) {
-    const e = RE_EFFORT.exec(frame.text(y))
-    if (e) {
-      effort = e[1].trim().replace(/\s+/g, ' ')
-      break
-    }
-  }
-  // 标题:选项块上方最近的非空行(≤6 行内)。各 state 的 resolve 共读,不必各自再找。
-  let title = ''
-  if (options.length) {
-    const top = Math.min(...options.flatMap((o) => o.rows))
-    for (let y = top - 1; y >= 0 && y >= top - 6; y--) {
-      const t = frame.text(y).trim()
-      if (t) {
-        title = t
-        break
-      }
-    }
-  }
-  return { options, footer, isBusy, inputBox, effort, title }
-}
-
-// 行是否被属性高亮:已绘制(非空)单元格里,反显 / 非默认底色占多数 → 高亮。
-function rowHighlighted(row: Cell[]): boolean {
-  let painted = 0
-  let hi = 0
-  for (const c of row) {
-    if (c.char === ' ' || c.char === '') continue
-    painted++
-    if (c.inverse || !c.bgDefault) hi++
-  }
-  return painted > 0 && hi >= Math.ceil(painted / 2)
-}
+// (PreOption / FramePre / Ctx / preFrame / rowHighlighted 已移至 ./pre,纯解析器单测在那边。)
 
 // ── 注册表 + 当前态 + 订阅 ──
 export interface StateInfo { kind: string }
@@ -137,18 +68,21 @@ export function subscribe(cb: (m: Match | null) => void) {
   }
 }
 
-function tick(frame: Frame) {
+// classify — 对一个忠实帧跑注册表(按 weight 升序,首个非空 resolve 胜出)→ Match | null。
+// 纯函数:只读 registry + 帧,不触 curMatch / 不通知订阅。tick 与单测共用它,保证「线上判定」与
+// 「测试判定」是同一口径(F6:测的就是跑的)。
+export function classify(frame: Frame): Match | null {
   const ctx: Ctx = { frame, pre: preFrame(frame) }
   const ordered = [...registry].sort((a, b) => a.weight - b.weight) // 态数极少,排序可忽略
   for (const s of ordered) {
     const info = s.resolve(ctx)
-    if (info) {
-      curMatch = { kind: s.kind, info }
-      for (const cb of subs) cb(curMatch)
-      return
-    }
+    if (info) return { kind: s.kind, info }
   }
-  curMatch = null
+  return null
+}
+
+function tick(frame: Frame) {
+  curMatch = classify(frame)
   for (const cb of subs) cb(curMatch)
 }
 
