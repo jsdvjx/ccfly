@@ -1,5 +1,19 @@
 # ccfly
 
+## 0.5.5
+
+### Patch Changes
+
+- 7d34c37: `ccfly new` and `ccfly a` can now set claude permission options, and the
+  interactive picker can create new sessions.
+
+  - New flags on both `ccfly new` and `ccfly a`: `--permission-mode <default|acceptEdits|plan|bypassPermissions>` and `--dangerously-skip-permissions` (alias `--yolo`), passed through to claude. They apply when a session is launched (new, or offline resume); attaching to an already-running session leaves its mode untouched.
+  - The `ccfly a` picker gained a "＋ new session" entry at both levels (current dir / project dir; shortcut `n`) and a footer to toggle the permission options live (`p` cycles permission-mode, `y` toggles skip) — applied to whatever you launch.
+
+  Also: the embedded web UI now renders `!command` bash echoes (`<bash-input>`/`<bash-stdout>`/`<bash-stderr>`) as IN/OUT/ERR cards instead of dropping them.
+
+- 86ddd3d: Log device-config refresh failures instead of swallowing them. `refreshConfig` now logs when the `GET /api/device/config` request errors, returns non-200, or yields unparseable JSON. The call still degrades gracefully (keeps existing State), but the failure is now observable — previously a silent return made it hard to tell why cloud-advertised config (proxy port/CA) wasn't being applied.
+
 ## 0.5.4
 
 ### Patch Changes
