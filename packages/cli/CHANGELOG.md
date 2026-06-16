@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.5.9
+
+### Patch Changes
+
+- Decouple the client web UI into the `ccfly-webdist` npm package and fetch it at runtime: the binary embeds a fallback copy and pulls a newer `ccfly-webdist` from npm (SRI-verified, cached under `~/.ccfly/webcache`), so UI updates ship via npm without rebuilding the platform binaries. Also sync local Claude sessions (summary docs + archived jsonl) to the cloud so they're listable/searchable cross-device.
+
 ## 0.5.8
 
 ### Patch Changes

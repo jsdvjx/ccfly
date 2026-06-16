@@ -1,6 +1,6 @@
 {
   "name": "@ccfly/react",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "React components that render a Claude Code session as a live, controllable web view.",
   "license": "MIT",
   "type": "module",
