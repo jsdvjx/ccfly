@@ -51,4 +51,18 @@ mkdir -p "${EMBED_DIR}"
 find "${EMBED_DIR}" -mindepth 1 -not -name .gitignore -delete
 cp -R "${DIST_DIR}/." "${EMBED_DIR}/"
 
+# 版本戳:把 ccfly-webdist 包版本写进内嵌 webdist/VERSION —— 二进制据此识别「内嵌版本」,
+# 与 npm 上 ccfly-webdist 的 latest 比对,决定是否运行时拉新 UI(见 go/internal/control/uisync.go)。
+# 占位 VERSION 已被上面的 find 清掉,这里按真实包版本重写。
+NPM_PKG_DIR="${ROOT_DIR}/npm/ccfly-webdist"
+UI_VERSION="$(node -e "process.stdout.write(require('${NPM_PKG_DIR}/package.json').version)")"
+printf '%s\n' "${UI_VERSION}" > "${EMBED_DIR}/VERSION"
+echo "build-web: stamped webdist/VERSION = ${UI_VERSION}"
+
+# 同步进 npm 包 ccfly-webdist 的 dist/ —— 这是 `npm publish` 的发布源(节点运行时从 npm 拉它)。
+rm -rf "${NPM_PKG_DIR}/dist"
+mkdir -p "${NPM_PKG_DIR}/dist"
+cp -R "${DIST_DIR}/." "${NPM_PKG_DIR}/dist/"
+echo "build-web: staged dist -> ${NPM_PKG_DIR}/dist (npm publish source)"
+
 echo "build-web: done — embedded web assets at ${EMBED_DIR}"

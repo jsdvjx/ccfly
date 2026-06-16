@@ -1,0 +1,26 @@
+{
+  "name": "ccfly-webdist",
+  "version": "0.1.0",
+  "description": "Prebuilt ccfly web UI (ttyd-ui SPA). The ccfly binary embeds a fallback copy and fetches newer versions of this package at runtime, so UI updates ship via npm without rebuilding/republishing the platform binaries.",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "author": "ccfly",
+  "homepage": "https://github.com/jsdvjx/ccfly#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jsdvjx/ccfly.git",
+    "directory": "npm/ccfly-webdist"
+  },
+  "keywords": [
+    "claude-code",
+    "tmux",
+    "ccfly",
+    "web-ui",
+    "spa"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

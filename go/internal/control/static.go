@@ -15,9 +15,11 @@ package control
 // 安全模型同本服务其它端点:自身不鉴权,默认绑回环,远端暴露交反代。
 
 import (
+	"context"
 	"embed"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -25,20 +27,27 @@ import (
 var webdistFS embed.FS
 
 // staticHandler 构造 SPA 静态托管 + history 回退的处理器。
-// fs.Sub 把根从 "webdist" 降到产物根,使 URL 路径与产物布局一一对应(/assets/x.js 等)。
+// 服务源不再恒为内嵌:uisync 后台按 npm 上 ccfly-webdist 的版本拉更新的 UI 到本地缓存,
+// 比内嵌新时切到缓存目录(见 uisync.go)。这里每请求读 servedUIDir() 决定服务源 ——
+// 有缓存用缓存(os.DirFS),否则用内嵌兜底(fs.Sub(webdistFS)),后台同步落定后无需重启即生效。
 func staticHandler() http.HandlerFunc {
-	sub, err := fs.Sub(webdistFS, "webdist")
+	embedded, err := fs.Sub(webdistFS, "webdist")
 	if err != nil {
 		// 仅当 embed 路径写错才会到这(编译期 embed 已保证目录存在);兜底返 500 文本。
 		return func(w http.ResponseWriter, _ *http.Request) { ctrlErr(w, 500, "spa embed: "+err.Error()) }
 	}
-	fileServer := http.FileServer(http.FS(sub))
+	// 一次性启动「从 npm 拉新 UI」后台巡检(serve / mesh 两条路都经 staticHandler;Once 保证只起一次)。
+	StartUISync(context.Background())
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		sub := embedded
+		if dir := servedUIDir(); dir != "" {
+			sub = os.DirFS(dir) // 缓存目录即 dist 根(index.html + assets/…),布局与内嵌一致
+		}
 		// URL 路径去掉前导 "/" 即 fs 路径;空(根)→ 让 FileServer 出 index.html。
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		if p == "" {
-			fileServer.ServeHTTP(w, r)
+			http.FileServer(http.FS(sub)).ServeHTTP(w, r)
 			return
 		}
 		// 文件存在 → 直接发(静态资源);不存在 → SPA 回退发 index.html。
@@ -46,7 +55,7 @@ func staticHandler() http.HandlerFunc {
 			serveIndex(w, r, sub)
 			return
 		}
-		fileServer.ServeHTTP(w, r)
+		http.FileServer(http.FS(sub)).ServeHTTP(w, r)
 	}
 }
 

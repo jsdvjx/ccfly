@@ -1,0 +1,3 @@
+# Built SPA, staged here by scripts/build-web.sh as the `npm publish` source
+# (the ccfly binary fetches this package at runtime). Generated, not tracked.
+dist/
