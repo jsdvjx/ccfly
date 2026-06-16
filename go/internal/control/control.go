@@ -44,6 +44,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -103,6 +104,8 @@ func Handler() http.Handler {
 	mux.HandleFunc("GET /state", handleState)
 	mux.HandleFunc("GET /info", handleInfo)
 	mux.HandleFunc("POST /start", handleStart)
+	mux.HandleFunc("GET /dirs", handleDirs)          // 目录浏览(新建会话选 cwd 用):列某路径下的子目录
+	mux.HandleFunc("POST /new", handleNew)           // 新建会话:在指定 cwd detached 起全新 claude,轮询 panemap 回真 sid
 	mux.HandleFunc("POST /takeover", handleTakeover) // 接管:杀掉会话既有 claude 进程,随后 /term 重建进 tmux(见 takeover.go)
 	mux.HandleFunc("POST /upload", handleUpload)     // 表世界图片/文件上传 → 落盘会话 cwd 的 .ccfly-uploads/(见 upload.go)
 	mux.HandleFunc("GET /term", handleTerm)          // 自带网页终端 WS(ttyd 兼容);去外部 ttyd 依赖
@@ -539,6 +542,119 @@ func handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctrlJSON(w, 200, map[string]any{"ok": true})
+}
+
+// handleDirs — GET /dirs?path=<abs>:列某路径下的子目录(新建会话的目录浏览器用)。
+// path 空 → 用户家目录。返回 {path, parent, dirs:[name...]}(只列子目录,跳过隐藏)。
+func handleDirs(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path == "" {
+		if h, err := os.UserHomeDir(); err == nil && h != "" {
+			path = h
+		} else {
+			path = "/"
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		ctrlErr(w, 400, "bad path")
+		return
+	}
+	ents, err := os.ReadDir(abs)
+	if err != nil {
+		ctrlErr(w, 400, "cannot read dir: "+err.Error())
+		return
+	}
+	dirs := []string{}
+	for _, e := range ents {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue // 跳过隐藏目录
+		}
+		if e.IsDir() {
+			dirs = append(dirs, name)
+		} else if e.Type()&os.ModeSymlink != 0 {
+			if fi, err := os.Stat(filepath.Join(abs, name)); err == nil && fi.IsDir() {
+				dirs = append(dirs, name)
+			}
+		}
+	}
+	sort.Slice(dirs, func(i, j int) bool { return strings.ToLower(dirs[i]) < strings.ToLower(dirs[j]) })
+	ctrlJSON(w, 200, map[string]any{"path": abs, "parent": filepath.Dir(abs), "dirs": dirs})
+}
+
+// handleNew — POST /new {cwd, permission_mode?, skip_permissions?}:在 cwd detached 起一个**全新**
+// claude(非 resume),随后轮询 panemap 等 SessionStart hook 写入 pane→sid,返回真 sid。
+// 前端据此导航到 /d/<device>/<sid>,后续按 sid 走既有镜像/转写主路;sid 暂未就绪也返回 tmux 名兜底。
+func handleNew(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Cwd            string `json:"cwd"`
+		PermissionMode string `json:"permission_mode"`
+		SkipPerms      bool   `json:"skip_permissions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		ctrlErr(w, 400, "bad json")
+		return
+	}
+	cwd := strings.TrimSpace(req.Cwd)
+	if cwd == "" {
+		cwd = "."
+	}
+	if fi, err := os.Stat(cwd); err != nil || !fi.IsDir() {
+		ctrlErr(w, 400, "not a directory: "+cwd)
+		return
+	}
+	suffix, err := claudePermSuffix(req.SkipPerms, req.PermissionMode)
+	if err != nil {
+		ctrlErr(w, 400, err.Error())
+		return
+	}
+	name := newTmuxName()
+	args := append([]string{"-u", "new-session", "-d"}, tmuxProxyEnvArgs()...)
+	args = append(args, "-s", name, "-c", cwd, "claude"+suffix)
+	if out, e := exec.Command("tmux", args...).CombinedOutput(); e != nil {
+		ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+e.Error()+")")
+		return
+	}
+	// 轮询 panemap 拿真 sid(claude 启动 + SessionStart hook 写入,通常 1~2s 内)。
+	sid := ""
+	deadline := time.Now().Add(10 * time.Second)
+	for sid == "" && time.Now().Before(deadline) {
+		for _, e := range loadPaneMap() {
+			if e.Name == name && e.Sid != "" {
+				sid = e.Sid
+				break
+			}
+		}
+		if sid == "" {
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	ctrlJSON(w, 200, map[string]any{"ok": true, "session": name, "session_id": sid})
+}
+
+// newTmuxName 生成 cc-<rand8> 的 tmux 会话名(与 `ccfly new` 同口径;真 sid 由 SessionStart hook 登记)。
+func newTmuxName() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("cc-%08x", imgBufSeq.Add(1))
+	}
+	return "cc-" + hex.EncodeToString(b)
+}
+
+// claudePermSuffix 把权限选项展开成追加到 `claude` 的命令行后缀(校验 permission_mode 取值)。
+func claudePermSuffix(skip bool, mode string) (string, error) {
+	if skip {
+		return " --dangerously-skip-permissions", nil
+	}
+	switch mode {
+	case "", "default":
+		return "", nil
+	case "acceptEdits", "plan", "bypassPermissions":
+		return " --permission-mode " + mode, nil
+	default:
+		return "", fmt.Errorf("invalid permission_mode %q (want default|acceptEdits|plan|bypassPermissions)", mode)
+	}
 }
 
 // handleInfo — 会话信息(模型/上下文用量/累计 token 花费/元信息),从 jsonl 派生,统一展示用。

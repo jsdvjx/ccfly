@@ -21,6 +21,9 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 
 	"golang.org/x/term"
 
@@ -103,12 +106,15 @@ func runPicker(opts sessionOpts) (pickResult, error) {
 			}
 		case keyEnter, keyRight:
 			if level == 0 {
-				if gi == 0 { // 「＋ 新建会话」(当前目录)
-					return pickResult{action: pickNew, dir: cwd, opts: opts}, nil
+				if gi == 0 { // 「＋ 新建会话…」→ 目录浏览器选目录
+					if dir, ok := pickDir(out, in, fd, cwd, &opts); ok {
+						return pickResult{action: pickNew, dir: dir, opts: opts}, nil
+					}
+					continue // 取消 → 回选择器(下一轮重绘)
 				}
 				gIdx, level, si = gi-1, 1, 0
 			} else {
-				if si == 0 { // 「＋ 在此目录新建」
+				if si == 0 { // 「＋ 在此目录新建」→ 直接在该项目目录建(快捷路径)
 					return pickResult{action: pickNew, dir: groups[gIdx].Cwd, opts: opts}, nil
 				}
 				return pickResult{action: pickAttach, sid: groups[gIdx].Rows[si-1].Sid, opts: opts}, nil
@@ -119,12 +125,14 @@ func runPicker(opts sessionOpts) (pickResult, error) {
 			} else {
 				return pickResult{}, nil // 顶层 Esc/← = 退出
 			}
-		case keyNew: // n 快捷新建:level0 → cwd;level1 → 组目录
-			dir := cwd
+		case keyNew: // n → 目录浏览器(从当前上下文起步,可任意导航后在某目录新建)
+			start := cwd
 			if level == 1 {
-				dir = groups[gIdx].Cwd
+				start = groups[gIdx].Cwd
 			}
-			return pickResult{action: pickNew, dir: dir, opts: opts}, nil
+			if dir, ok := pickDir(out, in, fd, start, &opts); ok {
+				return pickResult{action: pickNew, dir: dir, opts: opts}, nil
+			}
 		case keyPerm: // 循环 --permission-mode(并清掉 skip,二者互斥)
 			opts.skipPerms = false
 			opts.permMode = cyclePerm(opts.permMode)
@@ -160,6 +168,134 @@ func cyclePerm(cur string) string {
 		}
 	}
 	return permModes[(idx+1)%len(permModes)]
+}
+
+// ── 目录浏览器(新建会话选目录)────────────────────────────────────────────────
+
+func stdinIsTTY() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+
+// browseDir 是 `ccfly new` 无参时的独立入口:自建 raw mode + 备用屏,浏览目录选一个。
+// 非交互终端 → 报错(调用方据此回退到 cwd)。
+func browseDir(start string, opts *sessionOpts) (string, bool, error) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return "", false, fmt.Errorf("需要交互终端;用 `ccfly new <dir>` 直接指定目录")
+	}
+	old, err := term.MakeRaw(fd)
+	if err != nil {
+		return "", false, err
+	}
+	out := bufio.NewWriter(os.Stdout)
+	fmt.Fprint(out, "\x1b[?1049h\x1b[?25l")
+	out.Flush()
+	defer func() {
+		fmt.Fprint(out, "\x1b[?25h\x1b[?1049l")
+		out.Flush()
+		_ = term.Restore(fd, old)
+	}()
+	dir, ok := pickDir(out, bufio.NewReader(os.Stdin), fd, start, opts)
+	return dir, ok, nil
+}
+
+// pickDir 文件系统目录浏览器(假定 raw mode + 备用屏已开,供 picker 内嵌或 browseDir 调)。
+// 键:↑↓/jk 移动 · Enter/→ 进目录(在 .. 上 = 上级)· ←/h 上级 · n 在当前目录新建 · Esc/q 取消。
+// opts 指针:浏览时也能 p/y 改权限,变更回写给调用方。
+func pickDir(out *bufio.Writer, in *bufio.Reader, fd int, start string, opts *sessionOpts) (string, bool) {
+	cur := start
+	if cur == "" {
+		cur = "."
+	}
+	if abs, err := filepath.Abs(cur); err == nil {
+		cur = abs
+	}
+	sel := 0
+	for {
+		entries := subdirs(cur)
+		w, h, e := term.GetSize(fd)
+		if e != nil || w <= 0 || h <= 0 {
+			w, h = 80, 24
+		}
+		drawDirBrowser(out, cur, entries, sel, *opts, w, h)
+		key, e := readKey(in)
+		if e != nil {
+			return "", false
+		}
+		total := len(entries) + 1 // 含首行 ".."
+		switch key {
+		case keyUp:
+			if sel > 0 {
+				sel--
+			}
+		case keyDown:
+			if sel < total-1 {
+				sel++
+			}
+		case keyEnter, keyRight:
+			if sel == 0 {
+				cur, sel = filepath.Dir(cur), 0 // ".." → 上级
+			} else {
+				cur, sel = filepath.Join(cur, entries[sel-1]), 0
+			}
+		case keyLeft:
+			cur, sel = filepath.Dir(cur), 0
+		case keyNew:
+			return cur, true // n → 在当前目录新建
+		case keyPerm:
+			opts.skipPerms = false
+			opts.permMode = cyclePerm(opts.permMode)
+		case keySkip:
+			opts.skipPerms = !opts.skipPerms
+		case keyEsc, keyQuit:
+			return "", false
+		}
+	}
+}
+
+// subdirs 返回 dir 下的子目录名(含指向目录的符号链接),按名排序;跳过隐藏(.开头)。
+func subdirs(dir string) []string {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range ents {
+		name := e.Name()
+		if len(name) > 0 && name[0] == '.' {
+			continue // 跳过隐藏目录(需要隐藏目录用 `ccfly new <path>` 直指)
+		}
+		if e.IsDir() {
+			out = append(out, name)
+		} else if e.Type()&os.ModeSymlink != 0 {
+			if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.IsDir() {
+				out = append(out, name)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i]) < strings.ToLower(out[j]) })
+	return out
+}
+
+func drawDirBrowser(out *bufio.Writer, cur string, entries []string, sel int, opts sessionOpts, w, h int) {
+	fmt.Fprint(out, "\x1b[2J\x1b[H")
+	title := "新建会话 — 选择目录"
+	help := "↑↓ · Enter/→ 进 · ← 上级 · n 在此新建 · q 取消"
+	fmt.Fprintf(out, "\x1b[1m%s\x1b[0m\r\n", padBetween(title, help, w))
+	fmt.Fprintf(out, "\x1b[90m📁 %s\x1b[0m\r\n\r\n", collapseHome(cur))
+	n := h - 6
+	if n < 1 {
+		n = 1
+	}
+	total := len(entries) + 1
+	off := viewport(sel, total, n)
+	for i := off; i < total && i < off+n; i++ {
+		if i == 0 {
+			drawRow(out, "\x1b[90m..  (上级)\x1b[0m", sel == 0, w)
+			continue
+		}
+		drawRow(out, "\x1b[36m"+entries[i-1]+"/\x1b[0m", i == sel, w)
+	}
+	drawFooter(out, opts, h)
+	out.Flush()
 }
 
 // ── 键盘 ────────────────────────────────────────────────────────────────────
@@ -262,7 +398,7 @@ func drawProjects(out *bufio.Writer, groups []dirGroup, cursor int, opts session
 	off := viewport(cursor, total, n)
 	for i := off; i < total && i < off+n; i++ {
 		if i == 0 {
-			drawRow(out, fmt.Sprintf("\x1b[32m＋ 新建会话\x1b[0m  \x1b[90m%s\x1b[0m", collapseHome(cwd)), cursor == 0, w)
+			drawRow(out, fmt.Sprintf("\x1b[32m＋ 新建会话…\x1b[0m  \x1b[90m选目录(默认 %s)\x1b[0m", collapseHome(cwd)), cursor == 0, w)
 			continue
 		}
 		g := groups[i-1]

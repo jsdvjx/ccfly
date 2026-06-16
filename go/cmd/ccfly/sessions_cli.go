@@ -296,11 +296,20 @@ func runNew(args []string) error {
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	cwd := "."
 	if fs.NArg() > 0 {
-		cwd = fs.Arg(0)
+		return newSession(fs.Arg(0), *opts) // 显式给了目录 → 直接用
 	}
-	return newSession(cwd, *opts)
+	if stdinIsTTY() { // 无参 + 交互终端 → 目录浏览器选目录
+		dir, ok, err := browseDir(".", opts)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil // 用户取消,无声结束
+		}
+		return newSession(dir, *opts)
+	}
+	return newSession(".", *opts) // 非交互(脚本/管道):沿用当前目录
 }
 
 // newSession 在 dir 里起一个全新 claude 会话(带权限选项),exec 接管当前 TTY。
