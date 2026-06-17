@@ -136,6 +136,15 @@ func runClaudeLogout(args []string) error {
 		fs.PrintDefaults()
 	}
 	_ = fs.Parse(args)
+	// 通知云端清掉本设备的「按账号 /128」源路由(best-effort;云端据此重写 sing-box,后续 claude 回退默认出网)。
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	for _, t := range mesh.LoginTargets() {
+		if h := strings.TrimSpace(*host); h != "" && t.Host != h {
+			continue
+		}
+		_ = loginRouteClear(ctx, t)
+	}
 	n, err := mesh.ClearClaudeLoginContext(strings.TrimSpace(*host))
 	if err != nil {
 		return err
@@ -143,9 +152,14 @@ func runClaudeLogout(args []string) error {
 	if n == 0 {
 		fmt.Fprintln(os.Stderr, "ccfly: 无登录上下文可清。")
 	} else {
-		fmt.Fprintf(os.Stderr, "✓ 已清除 %d 份登录上下文(后续 claude 会话回退设备级出网代理)。\n", n)
+		fmt.Fprintf(os.Stderr, "✓ 已清除 %d 份登录上下文(后续 claude 会话回退默认出网)。\n", n)
 	}
 	return nil
+}
+
+// loginRouteClear 通知云端清掉本设备的按账号源路由(对应 cloud handleLoginRouteClear)。
+func loginRouteClear(ctx context.Context, t mesh.LoginTarget) error {
+	return loginDo(ctx, t, http.MethodPost, "/api/device/login/route/clear", nil, nil, nil)
 }
 
 // firstNonEmpty 返回首个非空(trim 后)字符串。
