@@ -88,6 +88,10 @@ func main() {
 		if err := runNew(os.Args[2:]); err != nil {
 			log.Fatalf("new: %v", err)
 		}
+	case "claude":
+		if err := runClaude(os.Args[2:]); err != nil {
+			log.Fatalf("claude: %v", err)
+		}
 	case "version", "-v", "--version":
 		fmt.Println("ccfly", version)
 	case "help", "-h", "--help":

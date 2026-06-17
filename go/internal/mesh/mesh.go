@@ -677,17 +677,32 @@ func newKeypair() (priv, pub string, err error) {
 		base64.StdEncoding.EncodeToString(k.PublicKey().Bytes()), nil
 }
 
-// EnsureTmuxProxyEnv 给 CLI(ccfly new / attach,独立进程、不入网)用:扫 ~/.ccfly/conn-*.json,
-// 据云端下发并持久化的代理策略(ProxyPort)把 CCFLY_TMUX_PROXY 设进本进程环境(若用户未已设),
-// 这样 CLI 创建的 tmux 会话和服务进程一样默认带好代理 + 局域网 bypass。无任何带 ProxyPort 的状态 →
-// no-op(零行为变化)。多个 host 取第一个有代理策略的。
+// EnsureTmuxProxyEnv 给 CLI(ccfly new / attach,独立进程、不入网)用:把会话出网代理
+// 设进本进程环境(若用户未已设),这样 CLI 创建的 tmux 会话和服务进程一样默认带好代理 + 局域网
+// bypass。优先级:
+//  1. `ccfly claude login` 落盘的「按账号 /128 路由」上下文(~/.ccfly/claude-login.json)——
+//     若它带了可用的按账号代理 URL,本机后续 claude 会话即从该账号的 /128 出网(见 claudeLoginProxyURL)。
+//  2. 否则回退到云端下发并持久化的设备级 overlay 代理策略(State.ProxyPort)。
+//
+// 二者都没有 → no-op(零行为变化)。用户已显式设 CCFLY_TMUX_PROXY(shell/plist)→ 一律尊重不覆盖。
 func EnsureTmuxProxyEnv() {
 	if os.Getenv("CCFLY_TMUX_PROXY") != "" {
 		return // 用户已显式设(shell/plist)→ 尊重,不覆盖
 	}
+	// 1) 按账号 /128 路由优先:登录上下文若给出了可用的按账号代理 URL,走它。
+	if applyClaudeLoginProxy() {
+		return
+	}
+	// 2) 回退:设备级 overlay 代理(多个 host 取第一个有 ProxyPort 的)。
+	applyOverlayProxyEnv()
+}
+
+// applyOverlayProxyEnv 扫 ~/.ccfly/conn-*.json,据云端下发并持久化的设备级代理策略(ProxyPort)
+// 把 CCFLY_TMUX_PROXY 设进本进程环境。返回是否设上了(无任何带 ProxyPort 的状态 → false)。
+func applyOverlayProxyEnv() bool {
 	dir, err := stateDir()
 	if err != nil {
-		return
+		return false
 	}
 	files, _ := filepath.Glob(filepath.Join(dir, "conn-*.json"))
 	for _, f := range files {
@@ -705,8 +720,179 @@ func EnsureTmuxProxyEnv() {
 		}
 		_ = os.Setenv("CCFLY_TMUX_PROXY", fmt.Sprintf("%s://127.0.0.1:%d", scheme, st.ProxyPort))
 		applyProxyCA(st.ProxyCA) // 同步落盘 CA + 设 CCFLY_TMUX_PROXY_CA,供 proxyenv 注入会话信任
-		return
+		return true
 	}
+	return false
+}
+
+// applyClaudeLoginProxy 据 `ccfly claude login` 落盘的登录上下文,把「该账号 /128 对应的代理」
+// 设进 CCFLY_TMUX_PROXY,使本机后续 claude 会话从该账号的 /128 出网。返回是否设上了。
+//
+// 安全回退:仅当上下文里**已有可用的按账号代理 URL**(ProxyURL,经 claudeLoginProxyURL 解析)时
+// 才接管;否则返回 false,让调用方回退到设备级 overlay 代理 —— 既不破坏现有出网,也不会因「拿不到
+// 路由参数」而把会话憋成无代理直连。注:当前云端的设备侧端点(login/poll、device/config)并不下发
+// byway 登录代理的 endpoint+secret,故 ProxyURL 通常为空、本函数为 no-op;待云端补下发后即自动生效
+// (详见 claudeLoginProxyURL 与 SaveClaudeLoginContext 的注释)。
+func applyClaudeLoginProxy() bool {
+	ctxs := LoadClaudeLoginContexts()
+	for _, c := range ctxs {
+		proxy := claudeLoginProxyURL(c)
+		if proxy == "" {
+			continue // 这条上下文没有可用代理 URL → 跳过(由调用方回退 overlay 代理)
+		}
+		_ = os.Setenv("CCFLY_TMUX_PROXY", proxy)
+		applyProxyCA(c.ProxyCA) // 出口若 MITM:同步落盘 CA + 设信任(登录代理是 blind-tunnel,通常无需,但兼容)
+		return true
+	}
+	return false
+}
+
+// LoginTarget 是 `ccfly claude login` 需要的:某个已入网云端的控制面地址 + mesh_token(鉴权登录 API)
+// + 设备 WG 密钥对(用私钥解开 worker 封装的 NaCl sealed-box 凭证)。
+type LoginTarget struct {
+	Host       string
+	Scheme     string
+	MeshToken  string
+	PrivateKey string // 设备 WG 私钥(base64);开 sealed-box 用
+	PublicKey  string
+}
+
+// LoginTargets 扫 ~/.ccfly/conn-*.json,返回所有已入网云端(有 mesh_token 的)。
+func LoginTargets() []LoginTarget {
+	dir, err := stateDir()
+	if err != nil {
+		return nil
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "conn-*.json"))
+	var out []LoginTarget
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var st State
+		if json.Unmarshal(data, &st) != nil || st.MeshToken == "" || st.Host == "" {
+			continue
+		}
+		out = append(out, LoginTarget{
+			Host: st.Host, Scheme: st.Scheme, MeshToken: st.MeshToken,
+			PrivateKey: st.PrivateKey, PublicKey: st.PublicKey,
+		})
+	}
+	return out
+}
+
+// ── claude login context: 按账号 /128 路由(~/.ccfly/claude-login.json,按 host 区分)──
+
+// ClaudeLoginContext 是 `ccfly claude login` 成功后落盘的「本机当前登录的 Claude 账号 + 其出口」。
+// 用途:让本机后续 claude 会话从**该账号的 /128**(EgressV6,在出口节点 OutNodeIP 上)出网。
+//
+// ProxyURL 是「直接可用的、把流量绑定到该账号 /128 的出网代理 URL」。它由 byway 的登录代理提供:
+// 形如 http://<EgressV6 的 32 位 hex>:<login-secret>@<byway-login-endpoint>(见 ~/byway/login.go 的
+// Basic-auth 用户名=/128 hex 机制,与 ~/ccfly-cloud/internal/server/login.go 的 loginProxyURL)。
+//
+// 关键现状:**设备目前拿不到 byway 登录代理的 endpoint + secret** —— 云端只在 worker-facing 的
+// /api/worker/jobs/{id}/params(worker bearer 鉴权)里下发 proxy_url,设备侧的 login/poll 与
+// device/config(mesh_token 鉴权)都不带它,且 endpoint(host:port)与 secret 均不可推导。故除非
+// 云端额外下发(建议:poll 返回里加 account_proxy_url,或 device/config 下发 login endpoint+secret),
+// 否则 ProxyURL 留空。留空时 EnsureTmuxProxyEnv 会安全回退到设备级 overlay 代理(见 applyClaudeLoginProxy)。
+type ClaudeLoginContext struct {
+	Host         string `json:"host"`                // 登录所经的云端(与 conn-<host>.json 对应)
+	AccountEmail string `json:"account_email"`       // 云端最终分配/登录的账号邮箱
+	EgressV6     string `json:"egress_v6"`           // 该账号的稳定出口 /128
+	OutNodeIP    string `json:"out_node_ip"`         // 该 /128 所在出口节点的 overlay IP
+	ProxyURL     string `json:"proxy_url,omitempty"` // 直接可用的按账号 /128 出网代理 URL(拿不到则空,见上)
+	ProxyCA      string `json:"proxy_ca,omitempty"`  // 出口若 MITM 需信任的 CA(登录代理 blind-tunnel,通常空)
+	UpdatedAt    string `json:"updated_at,omitempty"`
+}
+
+// claudeLoginPath 返回某云端的登录上下文文件路径(~/.ccfly/claude-login-<host>.json,按 host 区分)。
+func claudeLoginPath(host string) (string, error) {
+	dir, err := stateDir()
+	if err != nil {
+		return "", err
+	}
+	safe := strings.NewReplacer(":", "_", "/", "_").Replace(host)
+	return filepath.Join(dir, "claude-login-"+safe+".json"), nil
+}
+
+// SaveClaudeLoginContext 原子落盘某云端的登录上下文(0600)。host 为空则 no-op。
+func SaveClaudeLoginContext(c ClaudeLoginContext) error {
+	if c.Host == "" {
+		return errors.New("claude login context: empty host")
+	}
+	c.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	p, err := claudeLoginPath(c.Host)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, p)
+}
+
+// LoadClaudeLoginContexts 扫 ~/.ccfly/claude-login-*.json,返回所有已落盘的登录上下文。
+func LoadClaudeLoginContexts() []ClaudeLoginContext {
+	dir, err := stateDir()
+	if err != nil {
+		return nil
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "claude-login-*.json"))
+	var out []ClaudeLoginContext
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var c ClaudeLoginContext
+		if json.Unmarshal(data, &c) != nil {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// ClearClaudeLoginContext 删除某云端的登录上下文(host 为空 → 删全部)。供 `ccfly claude logout` 用。
+// 返回删掉的文件数。文件不存在不算错。
+func ClearClaudeLoginContext(host string) (int, error) {
+	dir, err := stateDir()
+	if err != nil {
+		return 0, err
+	}
+	var paths []string
+	if host != "" {
+		p, err := claudeLoginPath(host)
+		if err != nil {
+			return 0, err
+		}
+		paths = []string{p}
+	} else {
+		paths, _ = filepath.Glob(filepath.Join(dir, "claude-login-*.json"))
+	}
+	n := 0
+	for _, p := range paths {
+		if err := os.Remove(p); err == nil {
+			n++
+		} else if !os.IsNotExist(err) {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+// claudeLoginProxyURL 从登录上下文导出「该账号 /128 对应的出网代理 URL」。
+// 当前只信任上下文里**显式落盘的、直接可用的** ProxyURL(由云端下发,见 ClaudeLoginContext 注释)。
+// 没有就返回空 —— 不在设备侧凭 EgressV6 自行拼 byway URL,因为缺 login endpoint + secret,拼不出可用的;
+// 凭空编造只会把会话出网打到一个连不上的代理上。空 → 调用方安全回退设备级 overlay 代理。
+func claudeLoginProxyURL(c ClaudeLoginContext) string {
+	return strings.TrimSpace(c.ProxyURL)
 }
 
 // ── state persistence (~/.ccfly/conn-<host>.json) ──

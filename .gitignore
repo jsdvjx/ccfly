@@ -41,3 +41,6 @@ pnpm-debug.log*
 
 # claude code 会话本地数据
 .claude/
+
+# ccfly 粘贴/上传的图片暂存(运行时产物,非源码)
+.ccfly-uploads/
