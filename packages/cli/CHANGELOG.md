@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.6.1
+
+### Patch Changes
+
+- fix: `ccfly a` / `ccfly new` 给 tmux 会话设外层终端标题(标题=会话名,claude 设了 pane 标题再缀上 ` · <标题>`),开多个窗口时可一眼区分哪个跑哪个会话
+
 ## 0.6.0
 
 ### Minor Changes
