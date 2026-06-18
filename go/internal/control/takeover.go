@@ -368,5 +368,26 @@ func CLIAttachArgs(sid string, claudeArgs []string) []string {
 			args = append(args, cmd)
 		}
 	}
-	return args
+	return append(args, tmuxTitleArgs(name)...)
 }
+
+// tmuxTitleArgs 返回追加到 new-session 命令串后的 tmux 子命令(`;` 分隔),让本会话把
+// 外层终端标题设成会话名(claude 设了 pane 标题时再缀上 ` · <标题>`)。没有它,多个
+// `ccfly a` 窗口的标题全是 tmux 默认值,根本分不清哪个窗口跑的哪个会话。
+//
+//   - 作用域限定到本会话(set-option -t name,非 -g):不动用户自己别处的 tmux 标题。
+//   - set-titles on 后 tmux 接管外层标题;claude 自身的 OSC 标题落到 #{pane_title}。
+//   - pane_title 默认等于 #{host}(纯主机名),此时只显示 #S 不缀主机名,避免噪音;
+//     程序(claude)设了真标题才显示 `#S · <标题>`。
+//   - 以 exec 直接调 tmux,`;` 作为独立实参即被识别为命令分隔符,无需 shell 转义。
+func tmuxTitleArgs(name string) []string {
+	const titleFmt = "#{?#{==:#{pane_title},#{host}},#S,#S · #{pane_title}}"
+	return []string{
+		";", "set-option", "-t", name, "set-titles", "on",
+		";", "set-option", "-t", name, "set-titles-string", titleFmt,
+	}
+}
+
+// TmuxTitleArgs 导出 tmuxTitleArgs 供 cmd 层的「全新会话」路径(ccfly new)复用,
+// 与 attach 路径走同一套标题口径。
+func TmuxTitleArgs(name string) []string { return tmuxTitleArgs(name) }

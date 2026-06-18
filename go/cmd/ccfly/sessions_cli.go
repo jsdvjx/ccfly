@@ -331,6 +331,7 @@ func newSession(dir string, opts sessionOpts) error {
 	// 与 CLIAttachArgs 的 resume 命令口径一致(tmux 单参 = 交 shell 跑)。
 	claudeCmd := strings.Join(append([]string{"claude"}, opts.claudeArgs()...), " ")
 	targs = append(targs, "-A", "-s", name, "-c", dir, claudeCmd)
+	targs = append(targs, control.TmuxTitleArgs(name)...) // 外层终端标题设成会话名(多窗口可区分)
 	return execTmux(targs)
 }
 
