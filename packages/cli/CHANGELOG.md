@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.6.0
+
+### Minor Changes
+
+- `ccfly claude login`:`--email` 改可选 —— 省略时由 ccfly-cloud 在你可访问的共享账号里按 claude 用量 + 分配次数自动选号;登录成功后该设备的 claude 会话经 sing-box center 从所分配账号的专属 /128 出网。新增 `ccfly claude logout` 清除按账号路由(不删凭证)。
+
 ## 0.5.9
 
 ### Patch Changes
