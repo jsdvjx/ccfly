@@ -147,6 +147,13 @@ func cachedScanOne(path string, mtimeNs, size int64) (claudeSnapshot, bool) {
 	if e, hit := scanCache[path]; hit && e.mtimeNs == mtimeNs && e.size == size {
 		snap, ok := e.snap, e.ok // claudeSnapshot 是扁平值类型,拷贝出锁安全
 		scanMu.Unlock()
+		if ok {
+			// State/AgeSec 是时变量(classify 按「距今 <120s」判 working)。缓存按文件 (mtime,size)
+			// 命中,会话停笔后文件冻结、不再 miss → 必须每次重算,否则停笔瞬间的 working 永久冻住、
+			// 不衰减成 idle,/sessions 与 syncer 都报陈旧 working(状态对不上的根因)。重算只用已缓存
+			// 的内容字段(role/kind/preview/last_ts),不重读文件,廉价。
+			snap.AgeSec, snap.State = classify(snap.LastRole, snap.LastKind, snap.Preview, snap.LastTs)
+		}
 		return snap, ok
 	}
 	scanMu.Unlock()
