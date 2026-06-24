@@ -227,6 +227,42 @@ func RunPaneMapHook(stdin io.Reader) error {
 	return os.Rename(tmp, path) // 原子替换:读端永远看到完整 JSON
 }
 
+// renamePaneMapEntryName 在「把某 pane 的 tmux 会话重命名」之后,把真值表里该 paneID 条目的 Name
+// 同步成 newName。必须同步:ownershipFor 用「pane_id + 名字双匹配」校验条目(e.Name != p.Name 即弃用),
+// 若只改了 tmux 名却没改真值表,该 pane 的归属就被判不一致而丢弃,解析退化到启发式(本类 bug 之源)。
+// 与 hook 同款 flock + 原子写,避免与并发 hook 写互相丢更新。尽力而为,任何失败静默返回。
+func renamePaneMapEntryName(paneID, newName string) {
+	path := paneMapPath()
+	if path == "" || paneID == "" || newName == "" {
+		return
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX) != nil {
+		return
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	m := loadPaneMap()
+	e, ok := m[paneID]
+	if !ok || e.Name == newName {
+		return
+	}
+	e.Name = newName
+	m[paneID] = e
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0o600) != nil {
+		return
+	}
+	_ = os.Rename(tmp, path) // 原子替换
+}
+
 // claudeSettingsPath 用户级 Claude Code 配置。CCFLY_CLAUDE_SETTINGS 可覆盖(测试用)。
 func claudeSettingsPath() string {
 	if p := os.Getenv("CCFLY_CLAUDE_SETTINGS"); p != "" {

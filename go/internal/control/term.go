@@ -83,6 +83,11 @@ func handleTerm(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// 注意:解析不到具体会话时**不再**强起裸 claude —— 那会在 ccfly 进程 cwd(常为 HOME)起个错
+		// 目录的孤儿 claude,且不可被巡检回收(scanner 只回收裸壳)→ 同 cwd 多会话场景雪崩堆积(实测 top.pm:
+		// /root 与 /root/assistant 各堆十余个)。新建会话已由 handleNew 规范成 cc-<sid8> 名 → /term 精确命中
+		// 并 attach,根本不经此分支;genuine 未知名回落 new-session -A 的裸壳(可被巡检回收),宁可空壳也绝
+		// 不在错目录造一个真会话。
 	}
 
 	// 升级:接受 'tty' 子协议(ttyd 用),也接受无子协议(前端可不带)。

@@ -619,12 +619,12 @@ func handleNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 轮询 panemap 拿真 sid(claude 启动 + SessionStart hook 写入,通常 1~2s 内)。
-	sid := ""
+	sid, paneID := "", ""
 	deadline := time.Now().Add(10 * time.Second)
 	for sid == "" && time.Now().Before(deadline) {
-		for _, e := range loadPaneMap() {
+		for pid, e := range loadPaneMap() {
 			if e.Name == name && e.Sid != "" {
-				sid = e.Sid
+				sid, paneID = e.Sid, pid
 				break
 			}
 		}
@@ -632,7 +632,20 @@ func handleNew(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(250 * time.Millisecond)
 		}
 	}
-	ctrlJSON(w, 200, map[string]any{"ok": true, "session": name, "session_id": sid})
+	// 把随机会话名规范成 cc-<sid8>:前端按 sid 算出的 cc-<sid8> 据此**精确命中**本会话(/term 直接
+	// attach),不再依赖 panemap 真值表桥接 —— 杜绝「同 cwd 多会话时真值表 miss → 启发式不敢猜 →
+	// 在错目录起裸 claude/接到别的会话」的整类 bug。目标名已被别的活会话占用(sid 前 8 位罕见相撞)→
+	// 保持随机名(回落今日行为,绝不抢名)。重命名后同步真值表的 name,否则 ownershipFor 名字双匹配弃用该条目。
+	finalName := name
+	if sid != "" {
+		if want := defaultTmuxName(sid); want != name && !tmuxSessionLive(want) {
+			if exec.Command("tmux", "rename-session", "-t", name, want).Run() == nil {
+				finalName = want
+				renamePaneMapEntryName(paneID, want)
+			}
+		}
+	}
+	ctrlJSON(w, 200, map[string]any{"ok": true, "session": finalName, "session_id": sid})
 }
 
 // newTmuxName 生成 cc-<rand8> 的 tmux 会话名(与 `ccfly new` 同口径;真 sid 由 SessionStart hook 登记)。
