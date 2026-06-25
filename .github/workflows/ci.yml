@@ -1,0 +1,50 @@
+# CI — build + test on PRs and non-main pushes. NO secrets, NO deploy/publish.
+# (npm publishing is the separate, secret-bearing release.yml on main.)
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches-ignore: [main] # main pushes go through release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.mod
+      - name: go vet
+        run: go -C go vet ./...
+      - name: go build
+        run: go -C go build ./...
+      - name: go test
+        run: go -C go test ./...
+
+  ts:
+    name: TS typecheck + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: typecheck
+        run: pnpm typecheck
+      - name: build packages
+        run: pnpm build
+      - name: react tests
+        run: pnpm -C packages/react test
