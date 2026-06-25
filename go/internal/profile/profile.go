@@ -19,7 +19,7 @@
 //
 // 解析(「最严格者胜、env 只能降权」,严格度 restricted > instance > host > full;各档能力为全序子集):
 //
-//  1. 编译期默认 defaultMode —— 由 `-ldflags "-X github.com/ccfly/ccfly/go/internal/profile.defaultMode=instance"`
+//  1. 编译期默认 defaultMode —— 由 `-ldflags "-X github.com/jsdvjx/ccfly/go/internal/profile.defaultMode=instance"`
 //     注入;缺省 "full"(npm 分发不注入,保持现状,对现有用户零影响)。
 //  2. root 拥有的策略文件 /etc/ccfly/profile.json(可用 $CCFLY_PROFILE_FILE 覆盖):{"mode":"instance"}。
 //  3. 环境变量 CCFLY_PROFILE。

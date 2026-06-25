@@ -7,7 +7,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/ccfly/ccfly/go/internal/mesh"
+	"github.com/jsdvjx/ccfly/go/internal/mesh"
 )
 
 // openSealed 必须能用设备 WG 私钥打开 worker 用 NaCl sealed-box(box.SealAnonymous)封装到设备公钥的

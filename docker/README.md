@@ -69,7 +69,7 @@ curl -X POST -H "Authorization: Bearer $PROVISION_TOKEN" \
 #  → {"connect":"cc.hn/<码>", "host_id":"...", "connect_code":"<码>"}
 
 # (b) 用 host 档构建 ccfly-hostd(不在 npm 分发矩阵,运营方自建):
-go -C go build -ldflags "-X github.com/ccfly/ccfly/go/internal/profile.defaultMode=host" \
+go -C go build -ldflags "-X github.com/jsdvjx/ccfly/go/internal/profile.defaultMode=host" \
    -o ccfly-hostd ./cmd/ccfly-hostd
 
 # (c) 在 top.pm 上安装常驻(须已装 docker,且运行用户能访问 docker daemon):

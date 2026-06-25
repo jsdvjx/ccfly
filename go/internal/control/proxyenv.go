@@ -17,7 +17,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/ccfly/ccfly/go/internal/profile"
+	"github.com/jsdvjx/ccfly/go/internal/profile"
 )
 
 // defaultTmuxNoProxy 默认 bypass:loopback + 全部 RFC1918 私网(含 Docker 默认网桥 172.16/12)+

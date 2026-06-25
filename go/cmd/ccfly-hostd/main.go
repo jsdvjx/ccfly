@@ -7,7 +7,7 @@
 // It deliberately carries no Claude / tmux / control-service code: it only joins
 // the mesh and shells out to `docker`. Intended to run under the `host` capability
 // profile (MeshJoin + OverlayBridge + Install; claude/proxy/uisync off) — build it
-// with -ldflags "-X github.com/ccfly/ccfly/go/internal/profile.defaultMode=host",
+// with -ldflags "-X github.com/jsdvjx/ccfly/go/internal/profile.defaultMode=host",
 // or set /etc/ccfly/profile.json {"mode":"host"}.
 //
 // Usage:
@@ -28,10 +28,10 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/ccfly/ccfly/go/internal/hostagent"
-	"github.com/ccfly/ccfly/go/internal/mesh"
-	"github.com/ccfly/ccfly/go/internal/profile"
-	"github.com/ccfly/ccfly/go/internal/svc"
+	"github.com/jsdvjx/ccfly/go/internal/hostagent"
+	"github.com/jsdvjx/ccfly/go/internal/mesh"
+	"github.com/jsdvjx/ccfly/go/internal/profile"
+	"github.com/jsdvjx/ccfly/go/internal/svc"
 )
 
 var version = "dev"

@@ -5,7 +5,7 @@ package main
 import (
 	"testing"
 
-	"github.com/ccfly/ccfly/go/internal/control"
+	"github.com/jsdvjx/ccfly/go/internal/control"
 )
 
 func TestGroupByDir(t *testing.T) {

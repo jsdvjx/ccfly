@@ -31,7 +31,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ccfly/ccfly/go/internal/profile"
+	"github.com/jsdvjx/ccfly/go/internal/profile"
 )
 
 const (

@@ -28,5 +28,5 @@ CI cross-compiles this into per-platform binaries and packs each into an
 `@ccfly/cli-<os>-<cpu>` npm subpackage under `../npm/`. The `ccfly` npm package
 pulls in the matching one via optionalDependencies. See `../npm/README.md`.
 
-> Module path uses a placeholder org: `github.com/ccfly/ccfly/go`. Update it to
-> the real GitHub org/repo before publishing.
+> Module path: `github.com/jsdvjx/ccfly/go` (matches the GitHub remote
+> `github.com/jsdvjx/ccfly`).

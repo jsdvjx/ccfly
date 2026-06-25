@@ -33,7 +33,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/tun/netstack"
 
-	"github.com/ccfly/ccfly/go/internal/profile"
+	"github.com/jsdvjx/ccfly/go/internal/profile"
 )
 
 // exposeSpec exposes 127.0.0.1:localPort on the overlay at overlayPort, limited

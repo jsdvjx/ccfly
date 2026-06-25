@@ -32,10 +32,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ccfly/ccfly/go/internal/control"
-	"github.com/ccfly/ccfly/go/internal/mesh"
-	"github.com/ccfly/ccfly/go/internal/profile"
-	"github.com/ccfly/ccfly/go/internal/svc"
+	"github.com/jsdvjx/ccfly/go/internal/control"
+	"github.com/jsdvjx/ccfly/go/internal/mesh"
+	"github.com/jsdvjx/ccfly/go/internal/profile"
+	"github.com/jsdvjx/ccfly/go/internal/svc"
 )
 
 // version is overridden at build time via -ldflags.

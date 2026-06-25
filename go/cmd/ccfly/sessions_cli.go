@@ -23,8 +23,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 
-	"github.com/ccfly/ccfly/go/internal/control"
-	"github.com/ccfly/ccfly/go/internal/mesh"
+	"github.com/jsdvjx/ccfly/go/internal/control"
+	"github.com/jsdvjx/ccfly/go/internal/mesh"
 )
 
 // cliClaudeDir 解析 --claude-dir(与 serve/connect 同名同义)并注入 control。

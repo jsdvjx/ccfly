@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ccfly/ccfly/go/internal/profile"
+	"github.com/jsdvjx/ccfly/go/internal/profile"
 )
 
 // Options configures Install / Uninstall.

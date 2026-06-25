@@ -33,7 +33,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
-	"github.com/ccfly/ccfly/go/internal/mesh"
+	"github.com/jsdvjx/ccfly/go/internal/mesh"
 )
 
 // runClaude 分发 `ccfly claude <sub>`。

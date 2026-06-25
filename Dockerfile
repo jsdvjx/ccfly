@@ -48,7 +48,7 @@ RUN if ! ls internal/control/webdist/assets/*.js >/dev/null 2>&1; then \
 # 静态编译(CGO_ENABLED=0,glibc/musl 无依赖);把能力档默认编成 restricted。
 # 配合下方 /etc/ccfly/profile.json + 非 root 用户,env/文件都无法把它升回 full。
 RUN CGO_ENABLED=0 go build -trimpath \
-      -ldflags "-s -w -X main.version=${VERSION} -X github.com/ccfly/ccfly/go/internal/profile.defaultMode=${CCFLY_PROFILE}" \
+      -ldflags "-s -w -X main.version=${VERSION} -X github.com/jsdvjx/ccfly/go/internal/profile.defaultMode=${CCFLY_PROFILE}" \
       -o /out/ccfly ./cmd/ccfly
 
 ############################

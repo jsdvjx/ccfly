@@ -31,7 +31,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/ccfly/ccfly/go/internal/profile"
+	"github.com/jsdvjx/ccfly/go/internal/profile"
 )
 
 // State is the persisted per-host connection state (~/.ccfly/conn-<host>.json).

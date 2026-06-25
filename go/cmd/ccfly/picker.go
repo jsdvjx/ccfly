@@ -27,7 +27,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/ccfly/ccfly/go/internal/control"
+	"github.com/jsdvjx/ccfly/go/internal/control"
 )
 
 // pickResult — runPicker 的返回:接管已有会话 / 新建会话 / 取消(action 为空)。

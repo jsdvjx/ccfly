@@ -35,7 +35,7 @@ RUN if ! ls internal/control/webdist/assets/*.js >/dev/null 2>&1; then \
       exit 1; \
     fi
 RUN CGO_ENABLED=0 go build -trimpath \
-      -ldflags "-s -w -X main.version=${VERSION} -X github.com/ccfly/ccfly/go/internal/profile.defaultMode=${CCFLY_PROFILE}" \
+      -ldflags "-s -w -X main.version=${VERSION} -X github.com/jsdvjx/ccfly/go/internal/profile.defaultMode=${CCFLY_PROFILE}" \
       -o /out/ccfly ./cmd/ccfly
 
 ############################

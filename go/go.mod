@@ -1,4 +1,4 @@
-module github.com/ccfly/ccfly/go
+module github.com/jsdvjx/ccfly/go
 
 go 1.25.0
 

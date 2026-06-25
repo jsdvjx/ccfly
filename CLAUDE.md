@@ -69,7 +69,7 @@ sudo install -m755 /tmp/x /usr/local/bin/ccfly && sudo launchctl kickstart -k sy
 - **能力档闸门。** `internal/profile`:`full`(npm 默认)/`instance`/`host`/`restricted`,经 `-ldflags -X ...profile.defaultMode=` + root 的 `/etc/ccfly/profile.json` + `CCFLY_PROFILE`(只能加严)三层决定。受限档关掉 connect/install/claude/向会话注代理。
 - **二进制分发模型(esbuild/swc 式)。** 主包 `ccfly` 不带二进制,只声明 4 个平台 optionalDependencies;`bin/ccfly.js` 运行期按 `process.platform-arch` 解析对应 `ccfly-<os>-<arch>` 子包并 exec。`CGO_ENABLED=0` 全静态;musl(Alpine)被 shim 显式拒绝。
 - **安全姿态:控制服务自身不鉴权**,默认只绑 loopback。任何远程暴露必须前置鉴权反代 / hub(cc.hn 经鉴权 WireGuard overlay 网关每个 Node)。勿在不可信网络 bind `0.0.0.0`。
-- Go module path 用占位 org `github.com/ccfly/ccfly/go`(go/README 注明发布前要换)。
+- Go module path 是 `github.com/jsdvjx/ccfly/go`(与 GitHub remote `github.com/jsdvjx/ccfly` 一致;原占位 `github.com/ccfly/ccfly/go` 已统一改掉)。
 
 ## 相关项目
 本仓是 ccfly 系列的**设备端(Node)**,也是所有设备侧二进制(`ccfly`/`ccfly-mesh`/`ccfly-hostd`)的源头仓库。系列全景见 `~/ccfly-workspace/ccfly-series.md`。
