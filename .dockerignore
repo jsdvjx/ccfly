@@ -1,0 +1,15 @@
+# Docker 构建上下文裁剪。构建需要 go/ module(含 //go:embed 的 webdist 产物,勿排除)
+# 与 docker/ccfly-instance.sh(instance 镜像的 entrypoint),故不排除 docker/。
+.git
+.github
+**/node_modules
+bin
+go/bin
+go/ccfly
+packages
+examples
+npm
+.changeset
+.claude
+.vscode
+*.log

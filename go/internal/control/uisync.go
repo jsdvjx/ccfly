@@ -30,6 +30,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ccfly/ccfly/go/internal/profile"
 )
 
 const (
@@ -70,6 +72,9 @@ func uiCacheRoot() string {
 // StartUISync 一次性启动后台同步:先采纳已缓存的更新版本(离线友好),再起周期巡检。
 // 由 staticHandler 调用(serve / mesh 两条路都经它),用 sync.Once 保证只起一次。
 func StartUISync(ctx context.Context) {
+	if !profile.Current().UISync {
+		return // 受限模式:保持内嵌 UI,不外联 npm registry 拉新
+	}
 	uiOnce.Do(func() {
 		if dir, ver := bestCachedUI(); dir != "" && semverGt(ver, embeddedUIVersion()) {
 			setServedUIDir(dir)

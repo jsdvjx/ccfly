@@ -30,6 +30,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+
+	"github.com/ccfly/ccfly/go/internal/profile"
 )
 
 // State is the persisted per-host connection state (~/.ccfly/conn-<host>.json).
@@ -83,6 +85,9 @@ type connectResp struct {
 //
 // loopback host 默认 http,其余 https(可被显式 scheme 覆盖),与下方 scheme 逻辑一致。
 func Connect(ctx context.Context, target, version string) error {
+	if !profile.Current().MeshJoin {
+		return errors.New("受限档(profile=restricted):组网接入(mesh)已禁用")
+	}
 	if hasCode(target) {
 		return connectWithCode(ctx, target, version)
 	}
@@ -219,6 +224,9 @@ const (
 // `connect <host>`,凭这份已保存身份重连,不会开机就重新配对。若本机对该 host 已有完整
 // 身份则直接跳过配对(幂等)。
 func Pair(ctx context.Context, target, version string) error {
+	if !profile.Current().MeshJoin {
+		return errors.New("受限档(profile=restricted):组网接入(mesh)已禁用")
+	}
 	scheme, host := parseHost(target)
 	st, err := ensurePaired(ctx, scheme, host, version)
 	if err != nil {
@@ -421,6 +429,9 @@ func openBrowser(rawURL string) {
 //
 // 用户若已手动设了 CCFLY_TMUX_PROXY(服务 env / shell),尊重其值不覆盖。ProxyPort==0(云端未下发)→ no-op。
 func applyMeshProxy(st *State) {
+	if !profile.Current().MeshProxy {
+		return
+	}
 	if st == nil || st.ProxyPort <= 0 || st.CloudOverlayIP == "" {
 		return
 	}
@@ -686,6 +697,9 @@ func newKeypair() (priv, pub string, err error) {
 //
 // 二者都没有 → no-op(零行为变化)。用户已显式设 CCFLY_TMUX_PROXY(shell/plist)→ 一律尊重不覆盖。
 func EnsureTmuxProxyEnv() {
+	if !profile.Current().MeshProxy {
+		return // 非 full 档:不向 CLI 会话注入 mesh 代理 env(实例用用户自带 env)
+	}
 	if os.Getenv("CCFLY_TMUX_PROXY") != "" {
 		return // 用户已显式设(shell/plist)→ 尊重,不覆盖
 	}

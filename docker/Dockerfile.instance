@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1
+#
+# docker/Dockerfile.instance — ccfly「普通用户实例」镜像。
+#
+# 在 instance 档(profile=instance)下,容器内**真正运行** Claude Code,并作为**独立受控 mesh 节点**
+# 经 `ccfly connect` 接入 cc.hn overlay(被 Hub 经 /x/{device}/ 反代访问):
+#   - 装 Node 20 + claude CLI;
+#   - 凭证由用户环境变量自带(host-agent docker run 时 --env-file 注入),经 PID1 → tmux server → 会话
+#     继承到 claude(实测 tmux 新会话继承 server 首启时的环境,而 server 由带 env 的 ccfly connect 首启);
+#   - 启动后自动在工作区起一个 Claude Code 会话(走 ccfly /new:预信任目录 + cc-<sid8> 规范命名)。
+#
+# 通常由 VM 上的 ccfly-hostd(host-agent)经 cloud 编排自动 docker run;CCFLY_CONNECT_TARGET=cc.hn/<码>
+# 由 cloud 下发。instance 档放行受控 connect 接入,但仍禁 overlay 端口转发 / claude 账号登录 /
+# 常驻服务 / npm UI 同步;用户自带任意 env 也无法用 CCFLY_TMUX_PROXY 重开代理、或用 CCFLY_PROFILE 升档。
+#
+# 构建(context = 仓库根;先 staged web UI):
+#   bash scripts/build-web.sh
+#   docker build -f docker/Dockerfile.instance -t ccfly:instance .
+# 运行通常由 ccfly-hostd 经 cloud 编排;手动起一个(需连接码 + 凭证):
+#   docker run --rm -e CCFLY_CONNECT_TARGET=cc.hn/<码> -e ANTHROPIC_API_KEY=sk-ant-... ccfly:instance
+#   # 接入后经 cc.hn 反代访问:https://cc.hn/x/<device_id>/(带 access_token)
+
+############################
+# 1) builder:编译 instance 档 ccfly 二进制
+############################
+FROM golang:1.25-bookworm AS builder
+ARG VERSION=docker
+ARG CCFLY_PROFILE=instance
+WORKDIR /src
+COPY go/ ./go/
+WORKDIR /src/go
+# 护栏:webdist 必须已 staged 真实 SPA(仓库只跟踪占位,产物由 scripts/build-web.sh 生成)。
+RUN if ! ls internal/control/webdist/assets/*.js >/dev/null 2>&1; then \
+      echo "ERROR: go/internal/control/webdist/assets 为空 —— 请先在宿主跑 'bash scripts/build-web.sh'。" >&2; \
+      exit 1; \
+    fi
+RUN CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X main.version=${VERSION} -X github.com/ccfly/ccfly/go/internal/profile.defaultMode=${CCFLY_PROFILE}" \
+      -o /out/ccfly ./cmd/ccfly
+
+############################
+# 2) runtime:Node 20 + tmux + claude CLI
+############################
+FROM node:20-bookworm-slim
+ARG CLAUDE_CODE_VERSION=latest
+
+# 运行期依赖:tmux(会话/PTY)、procps(takeover 用 ps)、locales(UTF-8)、tini(PID1)、
+# curl(entrypoint 探活 + POST /new)、git(workspace 常用);claude CLI 全局装。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      tmux procps ca-certificates locales tini curl git \
+ && echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && locale-gen \
+ && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+ && npm cache clean --force \
+ && rm -rf /var/lib/apt/lists/*
+
+# 非 root 运行:受限用户改不动 root 拥有的策略文件、也换不掉二进制 —— 硬边界。
+RUN useradd --create-home --uid 10001 --shell /bin/bash app
+
+# instance 能力档:root 拥有、只读(与编译期 ldflags 默认双保险;非 root 用户改不动)。
+RUN mkdir -p /etc/ccfly \
+ && printf '{"mode":"instance"}\n' > /etc/ccfly/profile.json \
+ && chmod 0444 /etc/ccfly/profile.json
+
+COPY --from=builder /out/ccfly /usr/local/bin/ccfly
+COPY docker/ccfly-instance.sh /usr/local/bin/ccfly-instance
+RUN chmod 0755 /usr/local/bin/ccfly-instance
+
+# 工作区 + 运行期状态目录,属主归 app。
+RUN mkdir -p /home/app/.claude /home/app/.ccfly /home/app/workspace && chown -R app:app /home/app
+
+ENV HOME=/home/app \
+    SHELL=/bin/bash \
+    LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8 \
+    CCFLY_PROFILE=instance \
+    CCFLY_LOCAL_PORT=7699 \
+    CCFLY_CONNECT_TARGET=cc.hn \
+    CCFLY_WORKSPACE=/home/app/workspace \
+    DISABLE_AUTOUPDATER=1
+
+# 不 EXPOSE:connect 模式下 control 只绑回环,经 overlay 反代访问,不暴露宿主端口。
+# .ccfly 存设备身份(conn-<host>.json)+ panemap —— host-agent 须为每容器挂**独立**卷,不可共享宿主目录,
+# 否则多容器设备身份 / overlay IP 串号。
+VOLUME ["/home/app/workspace", "/home/app/.claude", "/home/app/.ccfly"]
+
+USER app
+WORKDIR /home/app
+ENTRYPOINT ["/usr/bin/tini", "--", "ccfly-instance"]

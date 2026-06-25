@@ -20,6 +20,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/ccfly/ccfly/go/internal/profile"
 )
 
 // Options configures Install / Uninstall.
@@ -74,6 +76,9 @@ func (o Options) resolve(home string) Profile {
 
 // Install sets up the persistent service for the current platform.
 func Install(o Options) error {
+	if !profile.Current().Install {
+		return fmt.Errorf("当前能力档(profile=%s):不可安装常驻服务", profile.Current().Mode)
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		return installDarwin(o)

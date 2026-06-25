@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/tun/netstack"
+
+	"github.com/ccfly/ccfly/go/internal/profile"
 )
 
 // exposeSpec exposes 127.0.0.1:localPort on the overlay at overlayPort, limited
@@ -74,6 +76,9 @@ func addAutoForward(localPort int, dstIP string, dstPort int) {
 // config. Each item is "overlayPort:localPort[@allowCIDR|allowCIDR|...]"; a bare
 // allow IP means a host (/32) rule. Empty input clears the config.
 func SetOverlayExpose(s string) error {
+	if strings.TrimSpace(s) != "" && !profile.Current().OverlayBridge {
+		return fmt.Errorf("当前能力档(profile=%s)禁用 overlay 端口转发(--overlay-expose)", profile.Current().Mode)
+	}
 	var out []exposeSpec
 	for _, item := range splitList(s) {
 		portPart, allowPart, _ := strings.Cut(item, "@")
@@ -101,6 +106,9 @@ func SetOverlayExpose(s string) error {
 // SetOverlayForward parses a comma-separated forward list, replacing any prior
 // config. Each item is "localPort:overlayIP:overlayPort". Empty input clears it.
 func SetOverlayForward(s string) error {
+	if strings.TrimSpace(s) != "" && !profile.Current().OverlayBridge {
+		return fmt.Errorf("当前能力档(profile=%s)禁用 overlay 端口转发(--overlay-forward)", profile.Current().Mode)
+	}
 	var out []forwardSpec
 	for _, item := range splitList(s) {
 		parts := strings.Split(item, ":")

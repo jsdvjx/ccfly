@@ -34,6 +34,7 @@ import (
 
 	"github.com/ccfly/ccfly/go/internal/control"
 	"github.com/ccfly/ccfly/go/internal/mesh"
+	"github.com/ccfly/ccfly/go/internal/profile"
 	"github.com/ccfly/ccfly/go/internal/svc"
 )
 
@@ -58,6 +59,23 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	ensureUTF8Locale()
+
+	// 能力档闸门(用户类型):按当前档关闭敏感命令。connect→MeshJoin(restricted 禁、instance 放行)、
+	// install/uninstall→Install、claude→Claude。仅「加严」,full 档零影响。
+	switch os.Args[1] {
+	case "connect":
+		if !profile.Current().MeshJoin {
+			log.Fatalf("ccfly: 当前能力档(profile=%s)下「connect」(组网接入)已禁用", profile.Current().Mode)
+		}
+	case "install", "uninstall":
+		if !profile.Current().Install {
+			log.Fatalf("ccfly: 当前能力档(profile=%s)下「%s」(常驻服务)已禁用", profile.Current().Mode, os.Args[1])
+		}
+	case "claude":
+		if !profile.Current().Claude {
+			log.Fatalf("ccfly: 当前能力档(profile=%s)下「claude」(账号登录/登出)已禁用", profile.Current().Mode)
+		}
+	}
 
 	switch os.Args[1] {
 	case "serve":
@@ -183,7 +201,15 @@ func runConnect(ctx context.Context, args []string) error {
 		if *claudeDir != "" {
 			control.SetClaudeDir(*claudeDir)
 		}
-		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		// in-process control 端口:默认 ephemeral(现有 ccfly connect 行为不变);设了
+		// CCFLY_LOCAL_PORT 则固定(instance 镜像据此让 entrypoint 探活 + POST /new)。
+		localPort := "0"
+		if p := strings.TrimSpace(os.Getenv("CCFLY_LOCAL_PORT")); p != "" {
+			if _, perr := strconv.Atoi(p); perr == nil {
+				localPort = p
+			}
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", localPort))
 		if err != nil {
 			return fmt.Errorf("start control service: %w", err)
 		}

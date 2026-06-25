@@ -16,6 +16,8 @@ package control
 import (
 	"os"
 	"strings"
+
+	"github.com/ccfly/ccfly/go/internal/profile"
 )
 
 // defaultTmuxNoProxy 默认 bypass:loopback + 全部 RFC1918 私网(含 Docker 默认网桥 172.16/12)+
@@ -27,6 +29,9 @@ const defaultTmuxNoProxy = "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192
 // tmuxProxyEnvArgs 返回注入 `tmux new-session` 的 `-e KEY=VAL` 参数对(无配置 → nil)。
 // 大小写两套都设(http_proxy 与 HTTP_PROXY 等),兼容只认其一的工具。
 func tmuxProxyEnvArgs() []string {
+	if !profile.Current().MeshProxy {
+		return nil // 非 full 档:即使设了 CCFLY_TMUX_PROXY 也不向会话注入代理
+	}
 	proxy := strings.TrimSpace(os.Getenv("CCFLY_TMUX_PROXY"))
 	if proxy == "" {
 		return nil // 未配置:不注入,默认部署零影响

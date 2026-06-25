@@ -26,6 +26,7 @@ import (
 	"syscall"
 
 	"github.com/ccfly/ccfly/go/internal/mesh"
+	"github.com/ccfly/ccfly/go/internal/profile"
 	"github.com/ccfly/ccfly/go/internal/svc"
 )
 
@@ -33,18 +34,28 @@ var version = "dev"
 
 func main() {
 	args := os.Args[1:]
+	// version / help 无害,先放行(不受能力档限制)。
 	if len(args) > 0 {
 		switch args[0] {
-		case "install":
-			exit(runInstall(args[1:]))
-		case "uninstall":
-			exit(runUninstall(args[1:]))
 		case "version", "-version", "--version":
 			fmt.Println("ccfly-mesh", version)
 			return
 		case "help", "-h", "--help":
 			usage()
 			return
+		}
+	}
+	// 能力档闸门:ccfly-mesh 整体即「组网」客户端,无接入能力(MeshJoin)即拒绝。
+	if !profile.Current().MeshJoin {
+		fmt.Fprintf(os.Stderr, "ccfly-mesh: 当前能力档(profile=%s)下组网功能已禁用\n", profile.Current().Mode)
+		os.Exit(1)
+	}
+	if len(args) > 0 {
+		switch args[0] {
+		case "install":
+			exit(runInstall(args[1:]))
+		case "uninstall":
+			exit(runUninstall(args[1:]))
 		}
 	}
 	exit(runConnect(args)) // default: enroll + hold the tunnel
