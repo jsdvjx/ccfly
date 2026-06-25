@@ -52,7 +52,7 @@ CLI 子命令(`go/cmd/ccfly/main.go`):`serve` `connect <host>[/<code>]` `install
 
 **升级流程(核实可编译;`launchctl kickstart -k` 需 sudo 密码,请让用户自己跑最后一步):**
 ```sh
-cd ~/ccfly/go && CGO_ENABLED=0 go build -o /tmp/x ./cmd/ccfly
+cd ~/ccfly-workspace/ccfly/go && CGO_ENABLED=0 go build -o /tmp/x ./cmd/ccfly
 sudo install -m755 /tmp/x /usr/local/bin/ccfly && sudo launchctl kickstart -k system/com.ccfly.agent
 ```
 > 当前 `/usr/local/bin/ccfly version` = 0.5.6,落后于仓库的 `packages/cli` 0.6.1 —— 改了代码记得用上面流程同步设备端。
@@ -72,8 +72,8 @@ sudo install -m755 /tmp/x /usr/local/bin/ccfly && sudo launchctl kickstart -k sy
 - Go module path 用占位 org `github.com/ccfly/ccfly/go`(go/README 注明发布前要换)。
 
 ## 相关项目
-本仓是 ccfly 系列的**设备端(Node)**,也是所有设备侧二进制(`ccfly`/`ccfly-mesh`/`ccfly-hostd`)的源头仓库。系列全景见 `~/ccfly-series.md`。
+本仓是 ccfly 系列的**设备端(Node)**,也是所有设备侧二进制(`ccfly`/`ccfly-mesh`/`ccfly-hostd`)的源头仓库。系列全景见 `~/ccfly-workspace/ccfly-series.md`。
 
-- **`ccfly-cloud`(云端 Hub,`~/ccfly-cloud`,跑在 `cc.hn`,overlay 网关 `100.64.0.1`)** — 闭源控制面、本机的对端。本机经 `ccfly connect cc.hn` 以 WG-over-WSS 拨入(`GET /mesh`)、用连接码入网(`POST /connect`);浏览器经 hub 网关 `https://cc.hn/x/<device>/…` 反代到本机 `overlay:7699` 的 `ccfly serve`(`overlayServicePort=7699` 须两仓一致)。本机那条 `127.0.0.1:2080 → overlay 100.64.0.1:2080` 出网转发、以及注入会话的出口 CA,都来自 hub 的 `GET /api/device/config`(`ProxyPort`/CA)。**改入网/网关/鉴权/device-config 下发策略 → 去 `ccfly-cloud`;改本机如何消费这些(`internal/mesh` 的 `applyMeshProxy`、`internal/control` 的 proxyenv 注入)→ 在本仓。这是跨仓协议契约,改一边要同步另一边。**
-- **`ccfly-app`(跨平台前端,`~/ccfly-app`)** — web + 原生 React 客户端,消费本机控制服务的会话契约:`/term`(WS)、`/sse/jsonl`(SSE)、`/sessions`、`/takeover`、`/new`、`/dirs`、`/upload`、`/sendkeys`、`/image`。`base=''` 同源(本仓 `go:embed` 的 web UI)或 `base=/x/<device>` 经 cc.hn 路由。`tmux` 会话名 `cc-<sid8>`、takeover「先杀后建」是两仓共享约定。**改这些端点的形状/语义 → 本仓 `internal/control`;改 UI 渲染/交互 → 去 `ccfly-app`(本仓自带的 `examples/web`+`@ccfly/react` 是较旧的 surface)。**
-- **`byway`(MITM 出口,`~/byway`,与 hub 同机 `cc.hn`,overlay `100.64.0.3:8080`)** — 本机 2080 出网转发的最终去向:overlay `100.64.0.1:2080` 进 cloud 上的 sing-box center,AI 域名按 `out-a` 路由到 byway 做 TLS bump 并记日志。会话里注入的 `NODE_EXTRA_CA_CERTS`(`~/.ccfly/proxy-ca.pem`)即 byway 的根 CA(由 hub 经 device-config 下发)。把 sing-box center/byway 接进同一 overlay 的是本仓 `cmd/ccfly-mesh`。**改出口/MITM/路由 → 去 `byway`;需要不被 MITM 的干净出口 → 绕开 byway(走 SG anytls)。**
+- **`ccfly-cloud`(云端 Hub,`~/ccfly-workspace/ccfly-cloud`,跑在 `cc.hn`,overlay 网关 `100.64.0.1`)** — 闭源控制面、本机的对端。本机经 `ccfly connect cc.hn` 以 WG-over-WSS 拨入(`GET /mesh`)、用连接码入网(`POST /connect`);浏览器经 hub 网关 `https://cc.hn/x/<device>/…` 反代到本机 `overlay:7699` 的 `ccfly serve`(`overlayServicePort=7699` 须两仓一致)。本机那条 `127.0.0.1:2080 → overlay 100.64.0.1:2080` 出网转发、以及注入会话的出口 CA,都来自 hub 的 `GET /api/device/config`(`ProxyPort`/CA)。**改入网/网关/鉴权/device-config 下发策略 → 去 `ccfly-cloud`;改本机如何消费这些(`internal/mesh` 的 `applyMeshProxy`、`internal/control` 的 proxyenv 注入)→ 在本仓。这是跨仓协议契约,改一边要同步另一边。**
+- **`ccfly-app`(跨平台前端,`~/ccfly-workspace/ccfly-app`)** — web + 原生 React 客户端,消费本机控制服务的会话契约:`/term`(WS)、`/sse/jsonl`(SSE)、`/sessions`、`/takeover`、`/new`、`/dirs`、`/upload`、`/sendkeys`、`/image`。`base=''` 同源(本仓 `go:embed` 的 web UI)或 `base=/x/<device>` 经 cc.hn 路由。`tmux` 会话名 `cc-<sid8>`、takeover「先杀后建」是两仓共享约定。**改这些端点的形状/语义 → 本仓 `internal/control`;改 UI 渲染/交互 → 去 `ccfly-app`(本仓自带的 `examples/web`+`@ccfly/react` 是较旧的 surface)。**
+- **`byway`(MITM 出口,`~/ccfly-workspace/byway`,与 hub 同机 `cc.hn`,overlay `100.64.0.3:8080`)** — 本机 2080 出网转发的最终去向:overlay `100.64.0.1:2080` 进 cloud 上的 sing-box center,AI 域名按 `out-a` 路由到 byway 做 TLS bump 并记日志。会话里注入的 `NODE_EXTRA_CA_CERTS`(`~/.ccfly/proxy-ca.pem`)即 byway 的根 CA(由 hub 经 device-config 下发)。把 sing-box center/byway 接进同一 overlay 的是本仓 `cmd/ccfly-mesh`。**改出口/MITM/路由 → 去 `byway`;需要不被 MITM 的干净出口 → 绕开 byway(走 SG anytls)。**
