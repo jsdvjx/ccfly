@@ -41,6 +41,7 @@ type syncSession struct {
 	LastTs    string `json:"last_ts,omitempty"`
 	GitBranch string `json:"git_branch,omitempty"`
 	Preview   string `json:"preview,omitempty"`
+	AttnKind  string `json:"attn_kind,omitempty"` // 待办类型(permission/plan/choice;无则省略),见 control/attn.go
 }
 
 // runSyncer 周期性同步本地会话到云端,直到 ctx 取消。在 runTunnel 里启一次(进程级生命周期)。
@@ -91,12 +92,13 @@ func syncOnce(ctx context.Context, st *State) {
 
 // pushSummaries 批量上推摘要文档,返回云端各会话已归档的字节 HWM(have)。
 func pushSummaries(ctx context.Context, st *State, digests []control.SessionDigest) (map[string]int64, bool) {
+	attn := control.AttnKinds() // sid → 待办类型(memoized,见 control/attn.go);权限/选择框 jsonl 看不到
 	arr := make([]syncSession, 0, len(digests))
 	for _, d := range digests {
 		arr = append(arr, syncSession{
 			ID: d.SessionID, Cwd: d.Cwd, Title: d.Title, Model: d.Model,
 			State: d.State, Turns: d.Turns, Tokens: d.Tokens, LastTs: d.LastTs,
-			GitBranch: d.GitBranch, Preview: d.Preview,
+			GitBranch: d.GitBranch, Preview: d.Preview, AttnKind: attn[d.SessionID],
 		})
 	}
 	payload, err := json.Marshal(map[string]any{"sessions": arr})

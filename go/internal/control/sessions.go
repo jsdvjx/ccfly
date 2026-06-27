@@ -48,6 +48,9 @@ type sessionRow struct {
 	// Tmux:该会话实际跑在的 tmux 会话名(resolveTmuxName 解析结果,扛 /clear 后的名字残留)。
 	// 表世界直接展示用;仅在解析到的名字确实在跑时填(与 cols/rows 同一分支)。
 	Tmux string `json:"tmux,omitempty"`
+	// AttnKind:该会话当前的「待办类型」(permission/plan/choice;无待办时省略)。来自对活 pane
+	// 抓屏的 detectState 分类(见 attn.go)——权限/选择框不写 jsonl,故 state 字段看不到,需另立。
+	AttnKind string `json:"attn_kind,omitempty"`
 }
 
 // handleSessions — GET /sessions:落地页会话列表(SessionMeta[] 形状 + 落地页补充字段)。
@@ -67,6 +70,8 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 	for _, p := range panes {
 		byName[p.Name] = p
 	}
+	// attn_kind:对活 pane 抓屏判定的「待办类型」(memoized,见 attn.go);只含有待办的会话。
+	attn := AttnKinds()
 
 	rows := make([]sessionRow, 0, len(snaps))
 	for _, s := range snaps {
@@ -84,6 +89,7 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 			AgeSec:    s.AgeSec,
 			Preview:   s.Preview,
 			Live:      live[s.SessionID],
+			AttnKind:  attn[s.SessionID],
 		}
 		// 该会话当前在跑的 pane(扛 /clear)→ 透出尺寸 + attach 数,供 chat 隐藏终端自适应;
 		// 顺带透出真实 tmux 会话名(表世界直接展示)。

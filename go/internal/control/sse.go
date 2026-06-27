@@ -96,6 +96,14 @@ func resolveSessionJsonlPane(session string, follow bool) (path, pane string, fo
 			return p, "", false
 		}
 	}
+	// cc-<sid8> 是 ccfly 受管会话名,其 sid 是权威的:走到这里仍没找到它的 jsonl =
+	// 该会话刚新建、transcript 尚未落盘(或已消亡)。绝不回退到「同 cwd 最新会话」——
+	// 否则「在此目录新建」会被渲染成同目录里的旧会话(实测 bug)。返回空让前端按
+	// 「暂无记录」处理(下次文件出现/重连即解析到真会话)。cwd-最新兜底只服务**非** cc-
+	// 的自定义 tmux 名(hook 未覆盖的存量进程)。
+	if strings.HasPrefix(session, "cc-") {
+		return "", "", false
+	}
 	cwd := ""
 	for _, p := range panes {
 		if p.Name == session {

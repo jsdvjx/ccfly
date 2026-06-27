@@ -1,5 +1,17 @@
 # ccfly
 
+## 0.7.0
+
+### Minor Changes
+
+- 设备端控制服务更新:
+
+  - feat(control): attn 检测 —— 从活动 pane 抓屏派生「待办类型」(权限确认 / 计划待批准 / 选择题),写入会话 `attn_kind`(jsonl 看不到的阻塞型待办信号),供 Hub/前端列表角标与置顶。
+  - fix(control): 新建会话规范 tmux 名为 `cc-<sid8>` + 撤裸 claude 兜底(根治接错会话 / 目录错 / 孤儿雪崩)。
+  - fix(claudescan): 缓存命中时重算会话状态,使「working」正确衰减。
+  - feat: ccfly-hostd 主机代理 + 能力档 profile + 受限 Docker 实例镜像(随附,非本包二进制)。
+  - chore: Go 模块路径迁移到 `github.com/jsdvjx/ccfly`;新增设备部署脚本 + CI。
+
 ## 0.6.1
 
 ### Patch Changes

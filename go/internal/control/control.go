@@ -619,6 +619,9 @@ func handleNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 轮询 panemap 拿真 sid(claude 启动 + SessionStart hook 写入,通常 1~2s 内)。
+	// 注:这里**只**等 sid,不等 transcript jsonl 落盘——全新会话在用户发出第一轮对话前
+	// 根本不写 jsonl,等文件只会白白卡满 deadline。前端按 cc-<sid8> 拉流时文件还不在的
+	// 那段窗口,由 resolveSessionJsonlPane 对 cc- 名「不回退到同 cwd 旧会话」来兜住(见 sse.go)。
 	sid, paneID := "", ""
 	deadline := time.Now().Add(10 * time.Second)
 	for sid == "" && time.Now().Before(deadline) {

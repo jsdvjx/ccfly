@@ -38,6 +38,22 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] &&
   echo "  serve 仍会启动,但会话里的 claude 会因未认证而无法工作。" >&2
 fi
 
+# 预置 Claude Code 首次运行状态:跳过「选择主题 / 引导」向导。否则全新容器里 claude 一启动就卡在
+# 交互式主题选择(theme picker)等输入 —— 会话永远进不去、~/.claude/projects 也不会创建、/sessions 报
+# no such file,网页端表现为「连接不上」。写在起会话之前;已存在则只补缺字段(不覆盖用户后续选择)。
+seed_claude_onboarding() {
+  local home="${HOME:-/home/app}"
+  command -v node >/dev/null 2>&1 || return 0
+  node -e '
+    const fs = require("fs"), p = process.argv[1] + "/.claude.json";
+    let j = {}; try { j = JSON.parse(fs.readFileSync(p, "utf8")) } catch (e) {}
+    if (j.hasCompletedOnboarding !== true) j.hasCompletedOnboarding = true;
+    if (!j.theme) j.theme = "dark";
+    fs.writeFileSync(p, JSON.stringify(j, null, 2));
+  ' "$home" 2>/dev/null || true
+}
+seed_claude_onboarding
+
 # 自动起一个会话:等 serve ready,再 POST /new(后台进行,不阻塞 serve 启动)。
 if [ "$(norm_bool "${CCFLY_AUTOSTART:-1}")" = "true" ]; then
   (
