@@ -56,17 +56,17 @@ importers:
   packages/cli:
     optionalDependencies:
       ccfly-darwin-arm64:
-        specifier: 0.6.1
-        version: 0.6.1
+        specifier: 0.7.0
+        version: 0.7.0
       ccfly-darwin-x64:
-        specifier: 0.6.1
-        version: 0.6.1
+        specifier: 0.7.0
+        version: 0.7.0
       ccfly-linux-arm64:
-        specifier: 0.6.1
-        version: 0.6.1
+        specifier: 0.7.0
+        version: 0.7.0
       ccfly-linux-x64:
-        specifier: 0.6.1
-        version: 0.6.1
+        specifier: 0.7.0
+        version: 0.7.0
 
   packages/react:
     dependencies:
@@ -949,26 +949,26 @@ packages:
   caniuse-lite@1.0.30001793:
     resolution: {integrity: sha512-iwSsYWaCOoh26cV8NwNRViHlrfUvYsHDfRVcbtmw0Kg6PJIZZXwMkj1442FYLBGkeUf1juAsU3DTfxW579mrPA==}
 
-  ccfly-darwin-arm64@0.6.1:
-    resolution: {integrity: sha512-/+XqbLe6A37WdjVzS8bpN/xtfvUMdcxSc91IP37JJbwKMFmBstnkvD5mW/pRXEISGs1d4c2pIsV2lSsMFLji3g==}
+  ccfly-darwin-arm64@0.7.0:
+    resolution: {integrity: sha512-73sdMwf+5ukteTRePPPLdGXOftUA353JleEmbIBLoNBJXvJnmP+0oZB8N/wpQDlrxv355Zur4q5sDBE+/a++5Q==}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [darwin]
 
-  ccfly-darwin-x64@0.6.1:
-    resolution: {integrity: sha512-vYWfnDzNkEgldEHayWssstdfru8yTtzA4T7s3T1jMB0iBNQpbQDU5BwaPyDcf7R+zust/tb8eIMN6bCGARk7WA==}
+  ccfly-darwin-x64@0.7.0:
+    resolution: {integrity: sha512-CEmhCnpKFDT3GIfEQIVMQzHMgOBNPKpwapp+3ak0xL/60TUGRALGXSsJRZwhkg3DIE7dj2oA0Ts+zjrtY3WORQ==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [darwin]
 
-  ccfly-linux-arm64@0.6.1:
-    resolution: {integrity: sha512-99n5jIvdFpE/T7nWJIl7J6mNcYex+IUfuw3ttOG6mvzhMRdw0z3OKFygCsfk22awwn+ySGKPOv/4Bsr2Cmufeg==}
+  ccfly-linux-arm64@0.7.0:
+    resolution: {integrity: sha512-2Pc0leXfOkmUA7Cfjyh/MvNbIxnaswYW0VIjjQgt6W74L6cBeek/3VNiO5Mp/BobYz6QidzcOO9WCerIggJyHA==}
     engines: {node: '>=18'}
     cpu: [arm64]
     os: [linux]
 
-  ccfly-linux-x64@0.6.1:
-    resolution: {integrity: sha512-q/9Vm/7W4KhBB7v1KYdEoGtKrnT0kBa5geO+lo/40enmHuDITMQY5ewaXIFKS5j6IcEQG4PLnEnWEaQ6sKzQww==}
+  ccfly-linux-x64@0.7.0:
+    resolution: {integrity: sha512-MztYK9ZzndmotF31EW1+bPmuRx5Utq0SdaMzEQs29C3FL6yo7/rkmqXM3foVCdLd8UupekdseQEenOnV4hhxiQ==}
     engines: {node: '>=18'}
     cpu: [x64]
     os: [linux]
@@ -2696,16 +2696,16 @@ snapshots:
 
   caniuse-lite@1.0.30001793: {}
 
-  ccfly-darwin-arm64@0.6.1:
+  ccfly-darwin-arm64@0.7.0:
     optional: true
 
-  ccfly-darwin-x64@0.6.1:
+  ccfly-darwin-x64@0.7.0:
     optional: true
 
-  ccfly-linux-arm64@0.6.1:
+  ccfly-linux-arm64@0.7.0:
     optional: true
 
-  ccfly-linux-x64@0.6.1:
+  ccfly-linux-x64@0.7.0:
     optional: true
 
   ccount@2.0.1: {}

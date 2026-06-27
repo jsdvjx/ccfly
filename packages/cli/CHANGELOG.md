@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.7.1
+
+### Patch Changes
+
+- fix: scanner now reads `custom-title` events so `/rename`-ed sessions show the user-set name instead of the directory name
+
 ## 0.7.0
 
 ### Minor Changes

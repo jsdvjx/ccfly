@@ -183,7 +183,8 @@ type rawEvent struct {
 	Timestamp string `json:"timestamp"`
 	Cwd       string `json:"cwd"`
 	GitBranch string `json:"gitBranch"`
-	AiTitle   string `json:"aiTitle"`
+	AiTitle     string `json:"aiTitle"`
+	CustomTitle string `json:"customTitle"`
 	// Edit/MultiEdit 的 tool_result 行在**顶层**带 toolUseResult(非 message 内),其中
 	// structuredPatch 是含上下文行的标准 hunk 数组(与 TUI 同源)。transcript 透传给前端画 diff。
 	ToolUseResult json.RawMessage `json:"toolUseResult"`
@@ -226,6 +227,10 @@ func scanOneSession(path string) (claudeSnapshot, bool) {
 		}
 		if ev.Type == "ai-title" && ev.AiTitle != "" {
 			snap.Title = ev.AiTitle
+		}
+		// /rename 写入 custom-title 事件,优先级高于 ai-title
+		if ev.Type == "custom-title" && ev.CustomTitle != "" {
+			snap.Title = ev.CustomTitle
 		}
 		if ev.Message != nil && (ev.Type == "user" || ev.Type == "assistant") {
 			snap.MsgCount++
