@@ -22,11 +22,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -180,7 +177,7 @@ func registryPids(sid string) []int {
 		if json.Unmarshal(b, &reg) != nil || reg.SessionID != sid || reg.Pid <= 0 {
 			continue
 		}
-		if syscall.Kill(reg.Pid, 0) != nil {
+		if !processAlive(reg.Pid) {
 			continue // 进程已死:注册表残留
 		}
 		if reg.StartedAt > 0 {
@@ -194,41 +191,9 @@ func registryPids(sid string) []int {
 	return out
 }
 
-// argvPids 扫 ps:argv0 是 claude 且命令行含完整 sid(uuid,无歧义)。
+// argvPids 扫进程列表:argv0 是 claude 且命令行含完整 sid(uuid,无歧义)。
 func argvPids(sid string) []int {
-	b, err := exec.Command("ps", "-axo", "pid=,command=").Output()
-	if err != nil {
-		return nil
-	}
-	var out []int
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.Contains(line, sid) {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil || pid <= 1 {
-			continue
-		}
-		if filepath.Base(fields[1]) != "claude" {
-			continue // tmux 客户端等转述者的 argv 也含 sid,不杀
-		}
-		out = append(out, pid)
-	}
-	return out
-}
-
-// processLstart 取进程的 ps lstart 原始串(本地时区渲染,如 "Wed Jun 10 10:29:18 2026")。
-func processLstart(pid int) (string, error) {
-	b, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(b)), nil
+	return processListByCommand(sid)
 }
 
 // startMatches 判断 ps lstart(本地渲染串)与注册表 startedAt(epoch 毫秒)是否同一启动时刻(±5s)。
@@ -254,12 +219,12 @@ func absDur(d time.Duration) time.Duration {
 // killWithGrace — SIGTERM → 限时等退出 → 仍活则 SIGKILL → 再限时等。返回实际终结的 pid。
 func killWithGrace(pids []int, term, kill time.Duration) ([]int, error) {
 	for _, pid := range pids {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
+		_ = processSignalTerm(pid)
 	}
 	alive := waitGone(pids, term)
 	if len(alive) > 0 {
 		for _, pid := range alive {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+			_ = processSignalKill(pid)
 		}
 		alive = waitGone(alive, kill)
 	}
@@ -285,7 +250,7 @@ func waitGone(pids []int, d time.Duration) []int {
 	for {
 		var alive []int
 		for _, pid := range pids {
-			if syscall.Kill(pid, 0) == nil {
+			if processAlive(pid) {
 				alive = append(alive, pid)
 			}
 		}

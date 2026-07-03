@@ -42,7 +42,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -104,13 +103,14 @@ func Handler() http.Handler {
 	mux.HandleFunc("GET /state", handleState)
 	mux.HandleFunc("GET /info", handleInfo)
 	mux.HandleFunc("POST /start", handleStart)
-	mux.HandleFunc("GET /dirs", handleDirs)          // 目录浏览(新建会话选 cwd 用):列某路径下的子目录
-	mux.HandleFunc("POST /new", handleNew)           // 新建会话:在指定 cwd detached 起全新 claude,轮询 panemap 回真 sid
-	mux.HandleFunc("POST /takeover", handleTakeover) // 接管:杀掉会话既有 claude 进程,随后 /term 重建进 tmux(见 takeover.go)
-	mux.HandleFunc("POST /upload", handleUpload)     // 表世界图片/文件上传 → 落盘会话 cwd 的 .ccfly-uploads/(见 upload.go)
-	mux.HandleFunc("GET /term", handleTerm)          // 自带网页终端 WS(ttyd 兼容);去外部 ttyd 依赖
-	mux.HandleFunc("GET /sessions", handleSessions)  // 落地页会话列表(SessionMeta[] 形状)
-	mux.HandleFunc("GET /sse/jsonl", handleSseJsonl)      // 原始 jsonl 增量流(SSE,fsnotify;ccfly-ttyd-ui 状态源)
+	mux.HandleFunc("GET /dirs", handleDirs)                // 目录浏览(新建会话选 cwd 用):列某路径下的子目录
+	mux.HandleFunc("POST /new", handleNew)                 // 新建会话:在指定 cwd detached 起全新 claude,轮询 panemap 回真 sid
+	mux.HandleFunc("POST /reload", handleReload)           // 重载会话:杀 tmux 再以 claude --resume 重建(可注入新 env_vars)
+	mux.HandleFunc("POST /takeover", handleTakeover)       // 接管:杀掉会话既有 claude 进程,随后 /term 重建进 tmux(见 takeover.go)
+	mux.HandleFunc("POST /upload", handleUpload)           // 表世界图片/文件上传 → 落盘会话 cwd 的 .ccfly-uploads/(见 upload.go)
+	mux.HandleFunc("GET /term", handleTerm)                // 自带网页终端 WS(ttyd 兼容);去外部 ttyd 依赖
+	mux.HandleFunc("GET /sessions", handleSessions)        // 落地页会话列表(SessionMeta[] 形状)
+	mux.HandleFunc("GET /sse/jsonl", handleSseJsonl)       // 原始 jsonl 增量流(SSE,fsnotify;ccfly-ttyd-ui 状态源)
 	mux.HandleFunc("GET /jsonl/before", handleJsonlBefore) // 向上翻页:before 字节前的一窗更老原始行(无状态)
 	// 内嵌 web 表世界 SPA:必须最后注册「GET /」兜底。Go 1.22 ServeMux「最具体优先」,
 	// 上面各显式 API 路由自动赢过它;剩下「非 API、无文件」路径回退 index.html(history 路由)。
@@ -200,7 +200,7 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 	// 仅提交分支过闸;raw keys / 纯打字不过(菜单导航、中断、实时打字必须永远可用)。
 	// 代价:每次提交多一次 capture-pane(亚 100ms,仅提交时、非每键),对聊天提交完全可接受。
 	if atomicSubmit {
-		out, err := exec.Command("tmux", "capture-pane", "-t", sess, "-p", "-e").CombinedOutput()
+		out, err := tmuxCmd("capture-pane", "-t", sess, "-p", "-e").CombinedOutput()
 		// 抓屏失败(pane 不在)= offline,等同非 input,照样 409 拒发。
 		kind := "offline"
 		if err == nil {
@@ -265,7 +265,7 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, c := range cmds {
-		if out, err := exec.Command("tmux", c...).CombinedOutput(); err != nil {
+		if out, err := tmuxCmd(c...).CombinedOutput(); err != nil {
 			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
 			return
 		}
@@ -289,16 +289,16 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 	// 绝不把旧占位误算成「已就绪」。仅在确有图要粘时抓 —— 纯文本提交零额外开销。
 	imgBaseline := 0
 	if len(imgPaths) > 0 {
-		if out, err := exec.Command("tmux", "capture-pane", "-t", sess, "-p").CombinedOutput(); err == nil {
+		if out, err := tmuxCmd("capture-pane", "-t", sess, "-p").CombinedOutput(); err == nil {
 			imgBaseline = strings.Count(string(out), imgPlaceholder)
 		}
 	}
 	for i, p := range imgPaths {
-		if out, err := exec.Command("tmux", "set-buffer", "-b", imgBuf, p).CombinedOutput(); err != nil {
+		if out, err := tmuxCmd("set-buffer", "-b", imgBuf, p).CombinedOutput(); err != nil {
 			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
 			return
 		}
-		if out, err := exec.Command("tmux", "paste-buffer", "-p", "-d", "-b", imgBuf, "-t", sess).CombinedOutput(); err != nil {
+		if out, err := tmuxCmd("paste-buffer", "-p", "-d", "-b", imgBuf, "-t", sess).CombinedOutput(); err != nil {
 			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
 			return
 		}
@@ -322,7 +322,7 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 	if len(imgPaths) > 0 {
 		want := imgBaseline + len(imgPaths)
 		for poll := 0; poll < 8; poll++ {
-			out, err := exec.Command("tmux", "capture-pane", "-t", sess, "-p").CombinedOutput()
+			out, err := tmuxCmd("capture-pane", "-t", sess, "-p").CombinedOutput()
 			if err != nil {
 				break // 抓屏失败(pane 没了等)→ 不死等,落下面照常发 Enter
 			}
@@ -342,7 +342,7 @@ func handleSendKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Enter {
-		if out, err := exec.Command("tmux", "send-keys", "-t", sess, "Enter").CombinedOutput(); err != nil {
+		if out, err := tmuxCmd("send-keys", "-t", sess, "Enter").CombinedOutput(); err != nil {
 			ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
 			return
 		}
@@ -401,7 +401,7 @@ func handleCapture(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("ansi") == "1" {
 		args = append(args, "-e")
 	}
-	out, err := exec.Command("tmux", args...).CombinedOutput()
+	out, err := tmuxCmd(args...).CombinedOutput()
 	if err != nil {
 		ctrlErr(w, 404, "tmux: "+strings.TrimSpace(string(out)))
 		return
@@ -481,7 +481,7 @@ func handleState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// -e 保留 ANSI 上色:detectState 内部对各判定先剥色,但「输入建议」靠 dim 属性识别,需带色原文。
-	out, err := exec.Command("tmux", "capture-pane", "-t", sess, "-p", "-e").CombinedOutput()
+	out, err := tmuxCmd("capture-pane", "-t", sess, "-p", "-e").CombinedOutput()
 	if err != nil {
 		ctrlJSON(w, 200, ctrlState{Kind: "offline"})
 		return
@@ -537,7 +537,7 @@ func handleStart(w http.ResponseWriter, r *http.Request) {
 	if req.Cmd != "" {
 		args = append(args, req.Cmd)
 	}
-	if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+	if out, err := tmuxCmd(args...).CombinedOutput(); err != nil {
 		ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
 		return
 	}
@@ -588,9 +588,10 @@ func handleDirs(w http.ResponseWriter, r *http.Request) {
 // 前端据此导航到 /d/<device>/<sid>,后续按 sid 走既有镜像/转写主路;sid 暂未就绪也返回 tmux 名兜底。
 func handleNew(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Cwd            string `json:"cwd"`
-		PermissionMode string `json:"permission_mode"`
-		SkipPerms      bool   `json:"skip_permissions"`
+		Cwd            string            `json:"cwd"`
+		PermissionMode string            `json:"permission_mode"`
+		SkipPerms      bool              `json:"skip_permissions"`
+		EnvVars        map[string]string `json:"env_vars,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		ctrlErr(w, 400, "bad json")
@@ -610,45 +611,111 @@ func handleNew(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trustFolder(cwd) // 用户显式选了此目录 → 预信任,跳过「信任此文件夹」对话框(否则挡住 SessionStart)
-	name := newTmuxName()
+	// sid 由我们预生成并经 `claude --session-id` 强制指定:/new 无需再轮询 panemap-hook 回传,
+	// 会话名直接就是规范的 cc-<sid8>。这同时解决 Windows(psmux 不设 TMUX_PANE,hook 注册不了)
+	// 下 /new 永远拿不到 sid → 前端按名解析 404 → 「连接中」卡死的问题;unix 下 hook 照常补真值表。
+	sid := newSessionUUID()
+	name := defaultTmuxName(sid)
+	if tmuxSessionLive(name) { // sid 前 8 位撞上活会话(概率极低):换随机名+新 sid 再试一次
+		sid = newSessionUUID()
+		name = defaultTmuxName(sid)
+		if tmuxSessionLive(name) {
+			ctrlErr(w, 500, "tmux session name collision")
+			return
+		}
+	}
 	args := append([]string{"-u", "new-session", "-d"}, tmuxProxyEnvArgs()...)
 	args = append(args, sandboxEnvArgs(req.SkipPerms)...) // root + skip-permissions → IS_SANDBOX=1 放行
-	args = append(args, "-s", name, "-c", cwd, "claude"+suffix)
-	if out, e := exec.Command("tmux", args...).CombinedOutput(); e != nil {
+	for k, v := range req.EnvVars {
+		args = append(args, "-e", k+"="+v)
+	}
+	args = append(args, "-s", name, "-c", cwd, "claude"+suffix+" --session-id "+sid)
+	if out, e := tmuxCmd(args...).CombinedOutput(); e != nil {
 		ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+e.Error()+")")
 		return
 	}
-	// 轮询 panemap 拿真 sid(claude 启动 + SessionStart hook 写入,通常 1~2s 内)。
-	// 注:这里**只**等 sid,不等 transcript jsonl 落盘——全新会话在用户发出第一轮对话前
-	// 根本不写 jsonl,等文件只会白白卡满 deadline。前端按 cc-<sid8> 拉流时文件还不在的
-	// 那段窗口,由 resolveSessionJsonlPane 对 cc- 名「不回退到同 cwd 旧会话」来兜住(见 sse.go)。
-	sid, paneID := "", ""
-	deadline := time.Now().Add(10 * time.Second)
-	for sid == "" && time.Now().Before(deadline) {
-		for pid, e := range loadPaneMap() {
-			if e.Name == name && e.Sid != "" {
-				sid, paneID = e.Sid, pid
-				break
-			}
-		}
-		if sid == "" {
-			time.Sleep(250 * time.Millisecond)
+	// 直接把「pane → sid」写进真值表(不等 hook):查刚建会话的 pane id,best-effort 登记。
+	// unix 上 SessionStart hook 稍后会以同 sid 幂等覆写;Windows(hook 因 TMUX_PANE 缺失而失效)
+	// 则全靠这里。查询失败不阻塞返回 —— 读取端还有「名字前缀 ↔ 扫描快照」兜底。
+	if out, e := tmuxCmd("list-panes", "-t", name, "-F", "#{pane_id}").Output(); e == nil {
+		if paneID := strings.TrimSpace(string(out)); paneID != "" {
+			registerPaneMapEntry(paneID, sid, name, cwd)
 		}
 	}
-	// 把随机会话名规范成 cc-<sid8>:前端按 sid 算出的 cc-<sid8> 据此**精确命中**本会话(/term 直接
-	// attach),不再依赖 panemap 真值表桥接 —— 杜绝「同 cwd 多会话时真值表 miss → 启发式不敢猜 →
-	// 在错目录起裸 claude/接到别的会话」的整类 bug。目标名已被别的活会话占用(sid 前 8 位罕见相撞)→
-	// 保持随机名(回落今日行为,绝不抢名)。重命名后同步真值表的 name,否则 ownershipFor 名字双匹配弃用该条目。
-	finalName := name
-	if sid != "" {
-		if want := defaultTmuxName(sid); want != name && !tmuxSessionLive(want) {
-			if exec.Command("tmux", "rename-session", "-t", name, want).Run() == nil {
-				finalName = want
-				renamePaneMapEntryName(paneID, want)
+	ctrlJSON(w, 200, map[string]any{"ok": true, "session": name, "session_id": sid})
+}
+
+// handleReload — POST /reload {session, env_vars?, cwd?}:杀掉会话对应的 tmux 会话后以
+// claude --resume 重建,可注入新的 env_vars(例如更新代理/环境变量)。
+// 典型用途:用户更改了出网配置,需要对已有会话「热重载」而非新建。
+// 流程:(1) 找到 cwd(优先 req.Cwd,否则从 scanClaudeSessions 取原始 cwd);
+//
+//	(2) tmux kill-session 删旧 pane;
+//	(3) tmux new-session -d 注入 env_vars + proxy env + claude --resume <sid>。
+func handleReload(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Session string            `json:"session"`
+		EnvVars map[string]string `json:"env_vars,omitempty"`
+		Cwd     string            `json:"cwd,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		ctrlErr(w, 400, "bad json")
+		return
+	}
+	sess := strings.TrimSpace(req.Session)
+	if sess == "" {
+		ctrlErr(w, 400, "session required")
+		return
+	}
+
+	// 先从 scanClaudeSessions 拿 cmd + cwd(kill 之前),以免杀掉后数据丢失。
+	var resumeCmd, cwd string
+	if snaps, e := scanClaudeSessions(); e == nil {
+		if c, cw, ok := claudeResumeCmd(sess, snaps); ok {
+			resumeCmd = c
+			if req.Cwd != "" {
+				cwd = req.Cwd
+			} else {
+				cwd = cw
 			}
 		}
 	}
-	ctrlJSON(w, 200, map[string]any{"ok": true, "session": finalName, "session_id": sid})
+	if cwd == "" && req.Cwd != "" {
+		cwd = req.Cwd
+	}
+	if resumeCmd == "" {
+		ctrlErr(w, 400, "cannot determine resume command for session: "+sess)
+		return
+	}
+
+	// kill 旧 tmux 会话(进程 + pane 一并清除)。
+	if out, e := tmuxCmd("kill-session", "-t", sess).CombinedOutput(); e != nil {
+		// 会话已不存在也允许继续(视为已死)。
+		_ = out
+	}
+
+	// 重建:注入 proxy env + 用户 env_vars + claude --resume <sid>。
+	args := append([]string{"-u", "new-session", "-d"}, tmuxProxyEnvArgs()...)
+	for k, v := range req.EnvVars {
+		args = append(args, "-e", k+"="+v)
+	}
+	args = append(args, "-s", sess)
+	if cwd != "" {
+		args = append(args, "-c", cwd)
+	}
+	// --resume 的会话会保留**存档时**的模型并无视 ANTHROPIC_MODEL env(见 Claude Code model-config
+	// 文档:"keep the model they were using when the transcript was saved")。故改模型必须额外用 --model
+	// flag(优先级高于 env);env 与 flag 两条腿一起走,最大化「重载即换模型」的成功率。模型值取自前端预设
+	// (claude-opus-4-8 等,无空格/元字符),tmux 按词拆 cmd 直接 exec,单串拼接安全。
+	if m := strings.TrimSpace(req.EnvVars["ANTHROPIC_MODEL"]); m != "" {
+		resumeCmd += " --model " + m
+	}
+	args = append(args, resumeCmd)
+	if out, e := tmuxCmd(args...).CombinedOutput(); e != nil {
+		ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+e.Error()+")")
+		return
+	}
+	ctrlJSON(w, 200, map[string]any{"ok": true})
 }
 
 // newTmuxName 生成 cc-<rand8> 的 tmux 会话名(与 `ccfly new` 同口径;真 sid 由 SessionStart hook 登记)。
@@ -658,6 +725,18 @@ func newTmuxName() string {
 		return fmt.Sprintf("cc-%08x", imgBufSeq.Add(1))
 	}
 	return "cc-" + hex.EncodeToString(b)
+}
+
+// newSessionUUID 生成 UUIDv4(给 `claude --session-id` 预指定 sid;/new 据此免等 hook)。
+func newSessionUUID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("00000000-0000-4000-8000-%012x", imgBufSeq.Add(1))
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	h := hex.EncodeToString(b)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
 // sandboxEnvArgs 在「以 root 跑 + 用了 --dangerously-skip-permissions」时返回 tmux 的
@@ -675,42 +754,55 @@ func sandboxEnvArgs(skip bool) []string {
 // SandboxEnvArgs 导出给 cmd/ccfly(ccfly new / picker 的 newSession)复用同一判定。
 func SandboxEnvArgs(skip bool) []string { return sandboxEnvArgs(skip) }
 
-// trustFolder 把 dir 预登记为 Claude Code 已信任(~/.claude.json 的
-// projects[abs].hasTrustDialogAccepted=true),让 ccfly 新建的会话跳过「是否信任此文件夹」对话框
-// —— 用户经目录浏览器显式选了该目录,即已表达信任,免掉那次点击(否则对话框会挡住 SessionStart)。
-// 全程失败安全:读不到 / 解析失败 / 写失败都不动原文件,绝不损坏 claude 主配置;原子写(临时文件 + rename)。
+// trustFolder 预备 ~/.claude.json,让 ccfly 起的 claude 会话不被 TUI 的两道拦截挡在 SessionStart:
+//
+//	(a) 标记首启引导已完成(hasCompletedOnboarding + theme)—— 跳过「选主题/登录方式」设置向导;
+//	    凭证有了也不够,新登录的设备/实例首启仍会弹这个向导(login 容器里也是这么 seed 的)。
+//	(b) 预登记 dir 为已信任(projects[abs].hasTrustDialogAccepted=true)—— 用户经目录浏览器显式选了它,
+//	    即已表达信任,免掉「是否信任此文件夹」那次点击。dir 为空则只做 (a)。
+//
+// **文件不存在时会创建**(claude 首启会读它 → 直接跳过两道拦截);这是相比旧版的关键修正 —— 旧版缺文件
+// 就返回,全新设备连 trust 都补不上。失败安全:已有文件解析不了就不动它(绝不损坏主配置);原子写。
 func trustFolder(dir string) {
-	abs, err := filepath.Abs(dir)
-	if err != nil {
-		return
-	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return
 	}
 	path := filepath.Join(home, ".claude.json")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return // 没有就算了(claude 首启会自建)
+	doc := map[string]any{}
+	if data, e := os.ReadFile(path); e == nil {
+		if json.Unmarshal(data, &doc) != nil {
+			return // 已有文件解析不了 → 绝不改写,避免损坏
+		}
 	}
-	var doc map[string]any
-	if json.Unmarshal(data, &doc) != nil {
-		return // 解析不了 → 绝不改写,避免损坏
+	changed := false
+	if v, _ := doc["hasCompletedOnboarding"].(bool); !v {
+		doc["hasCompletedOnboarding"] = true
+		changed = true
 	}
-	projects, ok := doc["projects"].(map[string]any)
-	if !ok || projects == nil {
-		projects = map[string]any{}
-		doc["projects"] = projects
+	if _, ok := doc["theme"]; !ok {
+		doc["theme"] = "dark"
+		changed = true
 	}
-	proj, ok := projects[abs].(map[string]any)
-	if !ok || proj == nil {
-		proj = map[string]any{}
-		projects[abs] = proj
+	if abs, e := filepath.Abs(dir); e == nil && strings.TrimSpace(dir) != "" {
+		projects, ok := doc["projects"].(map[string]any)
+		if !ok || projects == nil {
+			projects = map[string]any{}
+			doc["projects"] = projects
+		}
+		proj, ok := projects[abs].(map[string]any)
+		if !ok || proj == nil {
+			proj = map[string]any{}
+			projects[abs] = proj
+		}
+		if t, _ := proj["hasTrustDialogAccepted"].(bool); !t {
+			proj["hasTrustDialogAccepted"] = true
+			changed = true
+		}
 	}
-	if t, _ := proj["hasTrustDialogAccepted"].(bool); t {
-		return // 已信任,无需改写
+	if !changed {
+		return // 两道都已就绪
 	}
-	proj["hasTrustDialogAccepted"] = true
 	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return

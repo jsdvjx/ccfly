@@ -23,7 +23,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/jsdvjx/ccfly/go/internal/mesh"
 	"github.com/jsdvjx/ccfly/go/internal/profile"
@@ -135,7 +134,7 @@ func runConnect(args []string) error {
 		fmt.Fprintln(os.Stderr, "ccfly-mesh: note: --overlay-expose/--overlay-forward are ignored in kernel mode (overlay IPs are directly usable); pass --netstack to use bridges")
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	return mesh.Connect(ctx, target, version)
 }
@@ -175,7 +174,7 @@ func runInstall(args []string) error {
 	// service (the service then reconnects with the saved identity).
 	if isNoCode(target) && !*dry {
 		fmt.Println("ccfly-mesh install: 先完成一次网页配对,再安装常驻服务…")
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		err := mesh.Pair(ctx, target, version)
 		stop()
 		if err != nil {

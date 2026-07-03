@@ -8,7 +8,8 @@
       "ccfly-darwin-arm64",
       "ccfly-darwin-x64",
       "ccfly-linux-arm64",
-      "ccfly-linux-x64"
+      "ccfly-linux-x64",
+      "ccfly-win32-x64"
     ]
   ],
   "linked": [],

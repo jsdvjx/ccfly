@@ -15,10 +15,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"github.com/jsdvjx/ccfly/go/internal/profile"
@@ -70,7 +68,7 @@ func (o Options) resolve(home string) Profile {
 		BinName:     "ccfly",
 		Description: "ccfly overlay agent",
 		Args:        args,
-		NeedsTmux:   true,
+		NeedsTmux:   runtime.GOOS != "windows",
 	}
 }
 
@@ -84,8 +82,10 @@ func Install(o Options) error {
 		return installDarwin(o)
 	case "linux":
 		return installLinux(o)
+	case "windows":
+		return installWindows(o)
 	default:
-		return fmt.Errorf("ccfly install: unsupported OS %q (macOS/Linux only)", runtime.GOOS)
+		return fmt.Errorf("ccfly install: unsupported OS %q", runtime.GOOS)
 	}
 }
 
@@ -96,34 +96,14 @@ func Uninstall(o Options) error {
 		return uninstallDarwin(o)
 	case "linux":
 		return uninstallLinux(o)
+	case "windows":
+		return uninstallWindows(o)
 	default:
 		return fmt.Errorf("ccfly uninstall: unsupported OS %q", runtime.GOOS)
 	}
 }
 
 // ── shared helpers ──
-
-// runAs resolves the user the service should run as (and their home). For a
-// system service started via sudo we use the invoking user (SUDO_USER); for a
-// user service it's the current user.
-func runAs(system bool) (name, home string, uid, gid int, err error) {
-	var u *user.User
-	if system {
-		if n := os.Getenv("SUDO_USER"); n != "" && n != "root" {
-			u, err = user.Lookup(n)
-		} else {
-			u, err = user.Current()
-		}
-	} else {
-		u, err = user.Current()
-	}
-	if err != nil {
-		return "", "", -1, -1, err
-	}
-	uid, _ = strconv.Atoi(u.Uid)
-	gid, _ = strconv.Atoi(u.Gid)
-	return u.Username, u.HomeDir, uid, gid, nil
-}
 
 func claudeDirOf(o Options, home string) string {
 	if o.ClaudeDir != "" {
@@ -174,12 +154,10 @@ func run(name string, args ...string) error {
 }
 
 func validate(o Options) error {
-	// Target 可为 "<host>/<code>"(连接码流程)或纯 "<host>"(无码配对:配对已在
-	// install 阶段交互式完成、身份落盘,服务只需凭旧身份重连)。两种都合法,只校验非空。
 	if strings.TrimSpace(o.Target) == "" {
 		return fmt.Errorf("missing <host>[/<code>]")
 	}
-	if o.System && !o.DryRun && os.Geteuid() != 0 {
+	if o.System && !o.DryRun && !isRoot() {
 		return fmt.Errorf("--system needs root: re-run with sudo")
 	}
 	return nil
@@ -283,6 +261,8 @@ func installDarwin(o Options) error {
 		return nil
 	}
 
+	killStaleProcesses() // 清掉游离旧实例:多实例互顶 mesh 连接会 30s 规律断连
+
 	if err := copyExe(self, binPath, 0o755); err != nil {
 		return fmt.Errorf("install binary: %w", err)
 	}
@@ -313,7 +293,7 @@ func installDarwin(o Options) error {
 }
 
 func uninstallDarwin(o Options) error {
-	if o.System && os.Geteuid() != 0 {
+	if o.System && !isRoot() {
 		return fmt.Errorf("--system needs root: re-run with sudo")
 	}
 	_, home, _, _, err := runAs(o.System)
@@ -396,6 +376,8 @@ WantedBy=%s
 		return nil
 	}
 
+	killStaleProcesses() // 清掉游离旧实例:多实例互顶 mesh 连接会 30s 规律断连
+
 	if err := copyExe(self, binPath, 0o755); err != nil {
 		return fmt.Errorf("install binary: %w", err)
 	}
@@ -434,7 +416,7 @@ func uninstallLinux(o Options) error {
 		return nil
 	}
 	if o.System {
-		if os.Geteuid() != 0 {
+		if !isRoot() {
 			return fmt.Errorf("--system needs root: re-run with sudo")
 		}
 		_ = run("systemctl", "disable", "--now", p.LinuxUnit)
@@ -477,12 +459,3 @@ func userJournalFlag(system bool) string {
 	return " --user"
 }
 
-func chownTree(root string, uid, gid int) error {
-	return filepath.Walk(root, func(p string, _ os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		_ = os.Chown(p, uid, gid)
-		return nil
-	})
-}

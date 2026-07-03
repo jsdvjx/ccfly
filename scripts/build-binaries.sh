@@ -53,7 +53,7 @@ fi
 
 # --- target matrix ---------------------------------------------------------
 # "<goos>/<goarch>"; arch is the Go token (amd64), dir uses the npm token (x64).
-DEFAULT_TARGETS="darwin/arm64 darwin/amd64 linux/arm64 linux/amd64"
+DEFAULT_TARGETS="darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/amd64"
 TARGETS="${TARGETS:-$DEFAULT_TARGETS}"
 
 # Map Go GOARCH -> npm cpu token.
@@ -106,6 +106,46 @@ sync_subpkg_version() {
   fi
 }
 
+# --- bundle psmux for Windows (tmux-compatible multiplexer) ----------------
+PSMUX_VERSION="v3.3.6"
+
+bundle_psmux() {
+  local bin_dir="$1" goarch="$2"
+  local tmux_exe="${bin_dir}/tmux.exe"
+
+  if [[ -f "${tmux_exe}" && "${CLEAN:-0}" != "1" ]]; then
+    echo "build-binaries: psmux already bundled at ${tmux_exe}"
+    return
+  fi
+
+  local arch_token
+  case "${goarch}" in
+    amd64) arch_token="x64" ;;
+    arm64) arch_token="arm64" ;;
+    386)   arch_token="x86" ;;
+    *)     echo "build-binaries: SKIP psmux — unsupported arch ${goarch}" >&2; return ;;
+  esac
+
+  local zip_name="psmux-${PSMUX_VERSION}-windows-${arch_token}.zip"
+  local zip_url="https://github.com/psmux/psmux/releases/download/${PSMUX_VERSION}/${zip_name}"
+  local tmp_zip
+  tmp_zip="$(mktemp -t psmux-XXXXXX).zip"
+  local tmp_dir
+  tmp_dir="$(mktemp -d -t psmux-extract-XXXXXX)"
+
+  echo "build-binaries: downloading psmux ${PSMUX_VERSION} for windows/${goarch}"
+  if curl -ksSL -o "${tmp_zip}" "${zip_url}"; then
+    unzip -qo "${tmp_zip}" -d "${tmp_dir}"
+    cp "${tmp_dir}/tmux.exe" "${tmux_exe}"
+    chmod +x "${tmux_exe}"
+    echo "build-binaries: bundled tmux.exe (psmux) -> ${tmux_exe}"
+  else
+    echo "build-binaries: WARNING — failed to download psmux, tmux will not be bundled" >&2
+  fi
+
+  rm -rf "${tmp_zip}" "${tmp_dir}"
+}
+
 # --- build loop ------------------------------------------------------------
 built=0
 for target in ${TARGETS}; do
@@ -139,6 +179,11 @@ for target in ${TARGETS}; do
         "${GO_PKG}"
   )
   chmod +x "${out}"
+
+  # Bundle psmux (tmux-compatible multiplexer) for Windows targets
+  if [[ "${goos}" == "windows" ]]; then
+    bundle_psmux "${pkg_dir}/bin" "${goarch}"
+  fi
 
   sync_subpkg_version "${pkg_dir}/package.json" "${VERSION}"
   built=$((built + 1))

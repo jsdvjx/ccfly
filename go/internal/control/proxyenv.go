@@ -15,6 +15,7 @@ package control
 
 import (
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/jsdvjx/ccfly/go/internal/profile"
@@ -61,3 +62,32 @@ func tmuxProxyEnvArgs() []string {
 
 // TmuxProxyEnvArgs 导出给 cmd/ccfly(ccfly new / attach)复用同一注入逻辑。
 func TmuxProxyEnvArgs() []string { return tmuxProxyEnvArgs() }
+
+// tmuxProxyEnvKV 返回同一组注入项的 KEY=VAL 形式(给 tmux/psmux **进程环境**用)。
+// Windows 的 psmux 不支持 `new-session -e`,-e 注入静默丢失 → 会话里没有 http(s)_proxy /
+// NODE_EXTRA_CA_CERTS,claude 直连(墙内 403)或撞出口 MITM 证书。psmux server 是「首个 tmux
+// 命令」spawn 的,server 环境会被之后所有会话继承 —— 故把这组变量塞进每次 tmux 子进程的环境
+// (unix 上冗余但无害:-e 注入仍是权威,server 环境只是兜底)。
+func tmuxProxyEnvKV() []string {
+	args := tmuxProxyEnvArgs()
+	kv := make([]string, 0, len(args)/2)
+	for i := 1; i < len(args); i += 2 { // args 形如 ["-e","K=V","-e","K=V",...]
+		kv = append(kv, args[i])
+	}
+	return kv
+}
+
+// TmuxProxyEnvKV 导出给 cmd/ccfly(execTmux):CLI 的 tmux 调用同样可能是「spawn psmux server」
+// 的那一次,server 环境定格,必须带上同一组代理/CA KV(Windows 竞态盲区#3)。
+func TmuxProxyEnvKV() []string { return tmuxProxyEnvKV() }
+
+// tmuxCmd 构造 tmux 子进程:环境 = 本进程环境 + 代理/CA 注入项。所有会「顺带 spawn psmux
+// server」的 tmux 调用都必须走这里,否则 server 无代理环境,Windows 会话全体裸奔。
+func tmuxCmd(args ...string) *exec.Cmd {
+	c := exec.Command("tmux", args...)
+	if kv := tmuxProxyEnvKV(); len(kv) > 0 {
+		c.Env = append(os.Environ(), kv...)
+	}
+	setTmuxSysProcAttr(c) // Windows:DETACHED_PROCESS,阻断 psmux 控制台信号串门(见 tmuxproc_windows.go)
+	return c
+}

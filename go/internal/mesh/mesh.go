@@ -409,6 +409,14 @@ func openBrowser(rawURL string) {
 		name = "open"
 	case "linux":
 		name = "xdg-open"
+	case "windows":
+		name = "rundll32"
+		bin, err := exec.LookPath(name)
+		if err != nil {
+			return
+		}
+		_ = exec.Command(bin, "url.dll,FileProtocolHandler", rawURL).Start()
+		return
 	default:
 		return
 	}
@@ -703,12 +711,15 @@ func EnsureTmuxProxyEnv() {
 	if os.Getenv("CCFLY_TMUX_PROXY") != "" {
 		return // 用户已显式设(shell/plist)→ 尊重,不覆盖
 	}
-	// 1) 按账号 /128 路由优先:登录上下文若给出了可用的按账号代理 URL,走它。
-	if applyClaudeLoginProxy() {
+	// 1) 设备级 overlay 代理优先(127.0.0.1:<ProxyPort> → 云端 sing-box):按账号出口路由
+	//    已由云端按「设备源 IP → 账号 outbound」处理,该链路才是设备的正道。
+	// 2) 账号直连 URL(byway 登录代理 158.x:8443,凭证内嵌)只作最后回退:出口按**来源 IP**
+	//    放行(只认云端节点),设备家宽源发 CONNECT 会被 56ms 拒 400 —— 2026-07-03 Windows
+	//    「API Error: 400 Bad Request」实锤根因。切勿再把它放在 overlay 之前。
+	if applyOverlayProxyEnv() {
 		return
 	}
-	// 2) 回退:设备级 overlay 代理(多个 host 取第一个有 ProxyPort 的)。
-	applyOverlayProxyEnv()
+	applyClaudeLoginProxy()
 }
 
 // applyOverlayProxyEnv 扫 ~/.ccfly/conn-*.json,据云端下发并持久化的设备级代理策略(ProxyPort)

@@ -25,12 +25,8 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/jsdvjx/ccfly/go/internal/control"
 	"github.com/jsdvjx/ccfly/go/internal/mesh"
@@ -51,12 +47,19 @@ func main() {
 		_ = control.RunPaneMapHook(os.Stdin)
 		return
 	}
+	// _termpty:Windows /term 的 ConPTY 桥子进程(独立进程隔离 CTRL_CLOSE 连坐,见 termbridge_windows.go)。
+	if len(os.Args) > 1 && os.Args[1] == "_termpty" {
+		if err := runTermBridge(os.Args[2:]); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	ensureToolPath()
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signalContext()
 	defer stop()
 	ensureUTF8Locale()
 
@@ -180,6 +183,19 @@ func runConnect(ctx context.Context, args []string) error {
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
+
+	// 单例锁:多个 connect 实例会互相顶 /mesh 连接(30s 规律断连),必须全局唯一。
+	if err := mesh.AcquireSingleton(); err != nil {
+		return err
+	}
+
+	// 代理环境「早播种」:从落盘的 conn-<host>.json 预读设备级代理策略(ProxyPort/CA),
+	// 零网络即设好 CCFLY_TMUX_PROXY(_CA)。必须在控制服务/扫描器起来**之前**——扫描器首拍
+	// 的第一条 tmux 命令会 spawn psmux server 并把环境永久定格,若等 mesh 连上(至少一次
+	// HTTP 往返)后才 applyMeshProxy,Windows 上 server 必以「无代理环境」定格,其后所有
+	// 会话裸奔直连 → 403/400(2026-07-02/03 实锤竞态)。mesh 连上后 applyMeshProxy 照常
+	// 以最新下发值覆写(首次配对无 conn 文件时此调用为 no-op,行为不变)。
+	mesh.EnsureTmuxProxyEnv()
 
 	if err := mesh.SetOverlayExpose(*expose); err != nil {
 		return err
@@ -372,45 +388,4 @@ func envOr(key, def string) string {
 	return def
 }
 
-// ensureToolPath resolves the user's interactive login shell PATH and applies it
-// as the process PATH so all child processes (tmux, claude, etc.) inherit the
-// same environment a user would get in a terminal.  When ccfly runs as a
-// launchd/systemd service it inherits only a bare PATH (/usr/bin:/bin/…) that
-// omits ~/.local/bin (where `npm i -g` tools like claude land) and
-// /opt/homebrew/bin.  The login-shell probe fixes that at startup rather than
-// wrapping every individual command.
-//
-// Fallback: if the probe fails for any reason (non-interactive env, $SHELL
-// unset, 5-second timeout) we prepend the well-known static extras so at least
-// Homebrew and /usr/local tools resolve.
-func ensureToolPath() {
-	const fallbackExtras = "/opt/homebrew/bin:/usr/local/bin"
-	current := os.Getenv("PATH")
-	if current == "" {
-		current = "/usr/bin:/bin:/usr/sbin:/sbin"
-	}
-
-	sh := os.Getenv("SHELL")
-	if sh == "" {
-		sh = "/bin/sh"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, sh, "-ilc", "echo $PATH")
-	cmd.Stderr = nil // suppress interactive shell noise (motd, prompts)
-	out, err := cmd.Output()
-
-	if err == nil {
-		loginPath := strings.TrimSpace(string(out))
-		// Sanity: must look like a PATH (contains at least one '/').
-		if strings.Contains(loginPath, "/") {
-			os.Setenv("PATH", loginPath)
-			log.Printf("ccfly: PATH resolved from login shell (%d entries)", strings.Count(loginPath, ":")+1)
-			return
-		}
-	}
-	os.Setenv("PATH", fallbackExtras+":"+current)
-	log.Printf("ccfly: PATH fallback (login shell probe failed), prepended %s", fallbackExtras)
-}
+// ensureToolPath is platform-specific: see toolpath_unix.go / toolpath_windows.go.

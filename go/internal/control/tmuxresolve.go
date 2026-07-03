@@ -68,7 +68,7 @@ func listTmuxPanes() []tmuxPane {
 	// 末两段 session_created/session_attached 供后台巡检(scanner.go)判宽限期 + attach 数;
 	// 前 4 段索引不变,旧调用方/测试(struct 字面量)零影响。
 	// 末段 #{status}:tmux ≥3.0 的格式串可直接引用选项,按会话上下文展开(尊重会话级覆盖)。
-	out, err := exec.Command("tmux", "list-panes", "-a", "-F",
+	out, err := tmuxCmd("list-panes", "-a", "-F",
 		"#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_start_command}\t#{session_created}\t#{session_attached}\t#{window_width}\t#{window_height}\t#{pane_id}\t#{status}").Output()
 	if err != nil {
 		return nil
@@ -142,7 +142,7 @@ func tmuxSessionLive(name string) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
-	return exec.Command("tmux", "has-session", "-t", "="+name).Run() == nil
+	return tmuxCmd("has-session", "-t", "="+name).Run() == nil
 }
 
 // paneRunsClaude 粗判一个 pane 是否「正在跑 claude」(而非已掉回 shell)。

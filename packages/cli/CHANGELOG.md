@@ -1,5 +1,77 @@
 # ccfly
 
+## 0.10.9
+
+### Patch Changes
+
+- 400/断连根治组合:① 代理选择改为「设备 overlay(127.0.0.1:2080)优先」——原先优先注入的按账号直连出口 URL 被 byway 按来源 IP 拒(设备家宽 56ms 400,即 Windows「API Error: 400」根因);②connect 启动最早处从落盘 conn 文件预播种代理环境,根治「psmux server 抢在 mesh 上线前以无代理环境定格」竞态;③ 补齐 /term、scanner、CLI execTmux 三处环境注入盲区;④Windows 计划任务 vbs 改阻塞等待(RestartOnFailure 生效)+ 新增 5 分钟自愈重复触发器;⑤Windows 加整机级命名互斥,堵住跨用户 profile 双实例互顶
+
+## 0.10.8
+
+### Patch Changes
+
+- 新会话 SSE 死锁修复:cc- 名活着但 transcript 未落盘(第一条消息前 claude 不写 jsonl)时,/sse/jsonl 不再 404(EventSource 一见非 200 永久放弃 → 输入框卡「连接中」发不出第一条消息),改为 200 挂住轮询到文件出现;Windows tmux spawn 回退裸 spawn(DETACHED/NEW_PROCESS_GROUP 均致 psmux 会话夭折)
+
+## 0.10.7
+
+### Patch Changes
+
+- Windows 终端稳定性:ConPTY 移入独立桥进程(ccfly \_termpty)——关闭伪终端触发的 CTRL_CLOSE 会连坐宿主进程(实测关一次终端整个 connect 服务静默退出),隔离后最坏只损失桥进程;服务态忽略 console interrupt 双保险
+
+## 0.10.6
+
+### Patch Changes
+
+- Windows 会话代理/证书修复:psmux 不支持 new-session -e,改为经 tmux/psmux server 进程环境继承注入 http(s)\_proxy + NODE_EXTRA_CA_CERTS(出口 MITM CA),会话不再裸连/证书报错
+
+## 0.10.5
+
+### Patch Changes
+
+- Windows: 设 NoDefaultCurrentDirectoryInExePath,修「cwd 里散落 tmux.exe 时 exec.LookPath 拒绝执行」
+
+## 0.10.4
+
+### Patch Changes
+
+- Windows 端 app/网页可用性修复:/term 改用 ConPTY(原 creack/pty 不支持 Windows,终端连上即断);/new 预生成 sid 经 `claude --session-id` 指定并直写 panemap(psmux 不设 TMUX_PANE 致 hook 失效,新会话此前永远「连接中」)
+
+## 0.10.3
+
+### Patch Changes
+
+- Windows 计划任务经 wscript+VBS 隐藏启动,不再在桌面弹常驻黑色 cmd 窗口
+
+## 0.10.2
+
+### Patch Changes
+
+- install 前强杀游离旧实例(taskkill/pkill):旧进程与新服务互顶 mesh 连接致 30s 断连,Windows 下还会锁 exe 致覆盖失败
+
+## 0.10.1
+
+### Patch Changes
+
+- connect 单例锁(多实例互相顶 mesh 连接致 30s 断连)+ 修复 Windows 计划任务 cmd 引号剥离导致自启失效(改用 wrapper .cmd)
+
+## 0.10.0
+
+### Minor Changes
+
+- Windows: add `ccfly install`/`uninstall` support via Task Scheduler, bundle psmux (tmux.exe) for Windows terminal multiplexing
+
+## 0.9.0
+
+### Minor Changes
+
+- Add Windows (win32-x64) support: cross-platform build tags for syscall, process management, file locking; new ccfly-win32-x64 npm subpackage.
+
+## 0.8.0
+
+### Minor Changes
+
+- ccfly claude login 改为异步后台执行，新增 ccfly claude status 查看进度；新增 /reload 端点支持会话重载与环境变量注入
+
 ## 0.7.1
 
 ### Patch Changes

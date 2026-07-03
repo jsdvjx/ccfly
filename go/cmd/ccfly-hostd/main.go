@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/jsdvjx/ccfly/go/internal/hostagent"
 	"github.com/jsdvjx/ccfly/go/internal/mesh"
@@ -120,7 +119,7 @@ func runConnect(args []string) error {
 	srv := &http.Server{Handler: hostagent.Handler(hostagent.Config{Token: hostagent.LoadToken()})}
 	go func() { _ = srv.Serve(ln) }()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	go func() { <-ctx.Done(); _ = srv.Close() }()
 
@@ -156,7 +155,7 @@ func runInstall(args []string) error {
 	}
 	if isNoCode(target) && !*dry {
 		fmt.Println("ccfly-hostd install: 先完成一次接入配对,再安装常驻服务…")
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 		err := mesh.Pair(ctx, target, version)
 		stop()
 		if err != nil {

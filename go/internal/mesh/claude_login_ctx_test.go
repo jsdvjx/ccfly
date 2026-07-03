@@ -88,15 +88,27 @@ func TestEnsureTmuxProxyEnvRespectsUser(t *testing.T) {
 	}
 }
 
-// 登录上下文带可用 ProxyURL → 按账号 /128 代理优先于设备级 overlay 代理。
-func TestEnsureTmuxProxyEnvPrefersAccountProxy(t *testing.T) {
+// overlay 代理与账号直连 URL 并存 → **overlay 优先**(按账号出口路由由云端 sing-box 按源 IP
+// 处理;账号直连 URL 的出口按来源 IP 放行,设备家宽源会被 56ms 拒 400 —— 2026-07-03 实锤)。
+func TestEnsureTmuxProxyEnvPrefersOverlayOverAccountProxy(t *testing.T) {
 	isolateHome(t)
-	writeConn(t, State{Host: "cc.hn", ProxyPort: 2080, ProxyScheme: "http"}) // overlay 代理也在
+	writeConn(t, State{Host: "cc.hn", ProxyPort: 2080, ProxyScheme: "http"}) // overlay 代理在
+	acctProxy := "http://deadbeef:secret@sg.example:8443"
+	_ = SaveClaudeLoginContext(ClaudeLoginContext{Host: "cc.hn", AccountEmail: "a@b.co", ProxyURL: acctProxy})
+	EnsureTmuxProxyEnv()
+	if got := os.Getenv("CCFLY_TMUX_PROXY"); got != "http://127.0.0.1:2080" {
+		t.Fatalf("应优先设备级 overlay 代理,得 %q", got)
+	}
+}
+
+// 无 overlay 配置(conn 文件缺 ProxyPort)但登录上下文带 ProxyURL → 才回退按账号直连。
+func TestEnsureTmuxProxyEnvAccountProxyAsLastResort(t *testing.T) {
+	isolateHome(t)
 	acctProxy := "http://deadbeef:secret@sg.example:8443"
 	_ = SaveClaudeLoginContext(ClaudeLoginContext{Host: "cc.hn", AccountEmail: "a@b.co", ProxyURL: acctProxy})
 	EnsureTmuxProxyEnv()
 	if got := os.Getenv("CCFLY_TMUX_PROXY"); got != acctProxy {
-		t.Fatalf("应优先按账号代理 %q,得 %q", acctProxy, got)
+		t.Fatalf("无 overlay 时应回退按账号代理 %q,得 %q", acctProxy, got)
 	}
 }
 

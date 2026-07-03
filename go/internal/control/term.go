@@ -27,13 +27,11 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/creack/pty"
 )
 
 // ttyd 命令字节(ASCII)。
@@ -144,7 +142,7 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 	// tmux 默认 window-size=latest:最近 attach 的客户端尺寸即窗口尺寸 —— 手机/隐藏终端这类小(甚至 1 行)
 	// 客户端 attach 会把整个窗口拖小,极端时压成 1 行,claude 便无法渲染输入框/接收 paste+回车(发不出消息)。
 	// 改全局 largest:窗口取**最大**客户端尺寸,小客户端不再缩它(本地大终端在,就保持本地的大小)。幂等,失败忽略。
-	_ = exec.Command("tmux", "set-option", "-g", "window-size", "largest").Run()
+	_ = tmuxCmd("set-option", "-g", "window-size", "largest").Run()
 
 	// 2) 起 tmux(在 PTY 里),attach-or-create 同名会话 → 与本地/其它端实时镜像。
 	// -u:强制把客户端当 UTF-8(否则最小环境下 tmux 客户端 utf8=0,会把中文/符号降级成 '_')。
@@ -157,22 +155,17 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 	if cmd != "" {
 		args = append(args, cmd)
 	}
-	tmux := exec.CommandContext(ctx, "tmux", args...)
 	// 让 web 客户端的 tmux 输出落进 xterm 本地 scrollback(原生滚动),不抢替代屏幕。
-	tmux.Env = append(envWithout("TERM"), "TERM=screen-256color")
-
-	ptmx, err := pty.StartWithSize(tmux, &pty.Winsize{Cols: cols, Rows: rows})
+	// 代理 KV 必须一并带上:/term 的 attach-or-create 可能是「重新 spawn psmux server」的那次
+	// 调用(server 曾死),server 环境在此刻定格 —— 漏注入则其后所有会话裸奔(Windows 竞态盲区#1)。
+	env := append(envWithout("TERM"), "TERM=screen-256color")
+	env = append(env, tmuxProxyEnvKV()...)
+	ptmx, err := startTermProc("tmux", args, env, cols, rows)
 	if err != nil {
 		return err
 	}
 	// 收尾:关 PTY + 杀 tmux attach 进程(client/attach 进程结束即可,不动里世界会话)。
-	defer func() {
-		_ = ptmx.Close()
-		if tmux.Process != nil {
-			_ = tmux.Process.Kill()
-		}
-		_ = tmux.Wait()
-	}()
+	defer ptmx.Kill()
 
 	var wg sync.WaitGroup
 
@@ -229,7 +222,7 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 			case cmdResize: // RESIZE('1')+JSON{columns,rows}
 				var rz termResize
 				if json.Unmarshal(msg[1:], &rz) == nil && rz.Columns > 0 && rz.Rows > 0 {
-					_ = pty.Setsize(ptmx, &pty.Winsize{Cols: rz.Columns, Rows: rz.Rows})
+					ptmx.Resize(rz.Columns, rz.Rows)
 				}
 			case cmdPing: // PING('9')→ 原样回 PONG:浏览器据此判端到端链路活性
 				if werr := wsWrite(msg); werr != nil {
@@ -243,7 +236,7 @@ func serveTerm(ctx context.Context, cancel context.CancelFunc, c *websocket.Conn
 
 	<-ctx.Done()
 	// 触发两个 goroutine 退出:关 PTY 让阻塞的 Read 返回;CloseNow 让 c.Read 返回。
-	_ = ptmx.Close()
+	ptmx.ClosePTY()
 	c.CloseNow()
 	wg.Wait()
 

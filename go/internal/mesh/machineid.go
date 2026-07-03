@@ -45,6 +45,17 @@ func hardwareID() string {
 				}
 			}
 		}
+	case "windows":
+		out, err := exec.Command("wmic", "csproduct", "get", "UUID", "/value").Output()
+		if err == nil {
+			for _, ln := range strings.Split(string(out), "\n") {
+				if strings.HasPrefix(strings.TrimSpace(ln), "UUID=") {
+					if m := reUUID.FindString(ln); m != "" {
+						return m
+					}
+				}
+			}
+		}
 	}
 	return ""
 }

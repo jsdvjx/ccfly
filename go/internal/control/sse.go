@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -192,21 +193,43 @@ func handleSseJsonl(w http.ResponseWriter, r *http.Request) {
 	} else {
 		path, pane, followed = resolveSessionJsonlPane(session, follow)
 	}
-	if path == "" {
-		ctrlErr(w, 404, "no jsonl for session")
-		return
-	}
-
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		ctrlErr(w, 500, "stream unsupported")
 		return
 	}
-	h := w.Header()
-	h.Set("Content-Type", "text/event-stream; charset=utf-8")
-	h.Set("Cache-Control", "no-cache")
-	h.Set("X-Accel-Buffering", "no")
-	w.WriteHeader(http.StatusOK)
+	writeSSEHead := func() {
+		h := w.Header()
+		h.Set("Content-Type", "text/event-stream; charset=utf-8")
+		h.Set("Cache-Control", "no-cache")
+		h.Set("X-Accel-Buffering", "no")
+		w.WriteHeader(http.StatusOK)
+	}
+	if path == "" {
+		// 全新会话竞速:cc- 名的 tmux 活着,但 claude 在第一条消息前**不写 jsonl**。若此刻 404,
+		// EventSource 对非 200 直接放弃 → 前端输入框卡「连接中」永远发不出第一条消息 → transcript
+		// 永远不会出现(死锁;Windows 实测)。改为 200 挂住:先发 waiting meta,轮询到文件出现再进正常流。
+		if !strings.HasPrefix(session, "cc-") || !tmuxSessionLive(session) {
+			ctrlErr(w, 404, "no jsonl for session")
+			return
+		}
+		writeSSEHead()
+		fmt.Fprint(w, "retry: 1000\n")
+		fmt.Fprint(w, "event: meta\ndata: {\"waiting\":true}\n\n")
+		fl.Flush()
+		tick := time.NewTicker(500 * time.Millisecond)
+		defer tick.Stop()
+		for path == "" {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-tick.C:
+				path, pane, followed = resolveSessionJsonlPane(session, follow)
+			}
+		}
+	} else {
+		writeSSEHead()
+	}
 
 	since := int64(0)
 	if followed {

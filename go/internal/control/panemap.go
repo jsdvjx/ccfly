@@ -27,10 +27,8 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -168,7 +166,7 @@ func RunPaneMapHook(stdin io.Reader) error {
 	if paneID == "" {
 		return nil // 不在 tmux 里跑的 claude:没有 pane 可控,无须登记
 	}
-	nameB, err := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#{session_name}").Output()
+	nameB, err := tmuxCmd("display-message", "-p", "-t", paneID, "#{session_name}").Output()
 	if err != nil {
 		return nil
 	}
@@ -190,10 +188,10 @@ func RunPaneMapHook(stdin io.Reader) error {
 		return nil
 	}
 	defer lock.Close()
-	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX) != nil {
+	if flockExclusive(lock.Fd()) != nil {
 		return nil
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck // 解锁失败随 Close 释放
+	defer flockUnlock(lock.Fd()) //nolint:errcheck // 解锁失败随 Close 释放
 
 	m := loadPaneMap()
 	if m == nil {
@@ -205,7 +203,7 @@ func RunPaneMapHook(stdin io.Reader) error {
 		Prev: pushPrev(m[paneID], in.SessionID), UpdatedAt: time.Now().Unix(),
 	}
 	// 顺手清掉已死 pane 的条目:pane id 会被 tmux 复用,留着会张冠李戴(读取端还有名字双匹配兜底)。
-	if out, err := exec.Command("tmux", "list-panes", "-a", "-F", "#{pane_id}").Output(); err == nil {
+	if out, err := tmuxCmd("list-panes", "-a", "-F", "#{pane_id}").Output(); err == nil {
 		alive := map[string]bool{}
 		for _, id := range strings.Fields(string(out)) {
 			alive[id] = true
@@ -241,10 +239,10 @@ func renamePaneMapEntryName(paneID, newName string) {
 		return
 	}
 	defer lock.Close()
-	if syscall.Flock(int(lock.Fd()), syscall.LOCK_EX) != nil {
+	if flockExclusive(lock.Fd()) != nil {
 		return
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer flockUnlock(lock.Fd()) //nolint:errcheck
 	m := loadPaneMap()
 	e, ok := m[paneID]
 	if !ok || e.Name == newName {
@@ -261,6 +259,45 @@ func renamePaneMapEntryName(paneID, newName string) {
 		return
 	}
 	_ = os.Rename(tmp, path) // 原子替换
+}
+
+// registerPaneMapEntry 直接把「pane → sid」写进真值表(/new 用:sid 经 --session-id 预知,
+// 不等 SessionStart hook —— Windows/psmux 不设 TMUX_PANE,hook 注册不了,全靠这里)。
+// 与 hook 同款 flock + 原子写;尽力而为,任何失败静默返回。
+func registerPaneMapEntry(paneID, sid, name, cwd string) {
+	path := paneMapPath()
+	if path == "" || paneID == "" || sid == "" {
+		return
+	}
+	if os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+		return
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	if flockExclusive(lock.Fd()) != nil {
+		return
+	}
+	defer flockUnlock(lock.Fd()) //nolint:errcheck
+	m := loadPaneMap()
+	if m == nil {
+		m = map[string]paneMapEntry{}
+	}
+	m[paneID] = paneMapEntry{
+		Sid: sid, Name: name, Cwd: cwd,
+		Prev: pushPrev(m[paneID], sid), UpdatedAt: time.Now().Unix(),
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, data, 0o600) != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }
 
 // claudeSettingsPath 用户级 Claude Code 配置。CCFLY_CLAUDE_SETTINGS 可覆盖(测试用)。

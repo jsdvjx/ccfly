@@ -1,0 +1,32 @@
+{
+  "name": "ccfly-win32-x64",
+  "version": "0.10.9",
+  "description": "Prebuilt ccfly Go binary for Windows x64.",
+  "license": "MIT",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin"
+  ],
+  "preferUnplugged": true,
+  "author": "ccfly",
+  "homepage": "https://github.com/jsdvjx/ccfly#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jsdvjx/ccfly.git",
+    "directory": "npm/ccfly-win32-x64"
+  },
+  "keywords": [
+    "claude-code",
+    "terminal",
+    "websocket",
+    "ccfly"
+  ]
+}

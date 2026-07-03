@@ -20,7 +20,6 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 
 	"github.com/jsdvjx/ccfly/go/internal/control"
@@ -336,12 +335,14 @@ func newSession(dir string, opts sessionOpts) error {
 }
 
 // execTmux 以 exec 替换自身为 tmux 客户端(接管 TTY;退出码/信号语义同手敲 tmux)。
+// Unix 下用 syscall.Exec 替换进程;Windows 下 spawn 子进程并等待。
 func execTmux(args []string) error {
 	tmux, err := exec.LookPath("tmux")
 	if err != nil {
 		return fmt.Errorf("tmux not found in PATH")
 	}
-	return syscall.Exec(tmux, append([]string{"tmux"}, args...), os.Environ())
+	env := append(os.Environ(), control.TmuxProxyEnvKV()...) // psmux server 若由本次调用 spawn,环境在此定格
+	return execProcess(tmux, append([]string{"tmux"}, args...), env)
 }
 
 // matchSid:完整 sid / 任意前缀 / cc-<sid8>,唯一命中才采信。

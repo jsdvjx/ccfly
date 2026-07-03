@@ -21,7 +21,6 @@ package control
 // 由 hook 当闸门,从根本上不再把用户主动开的菜单当成「在等你」。
 
 import (
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -137,7 +136,7 @@ func AttnKinds() map[string]string {
 
 // captureScreen 抓「当前可见屏」(无 -S,与 handleState 同口径;-e 保留 ANSI 供 detectState)。
 func captureScreen(name string) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-t", name, "-p", "-e").CombinedOutput()
+	out, err := tmuxCmd("capture-pane", "-t", name, "-p", "-e").CombinedOutput()
 	if err != nil {
 		return "", err
 	}

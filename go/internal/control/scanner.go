@@ -12,7 +12,6 @@ package control
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -68,7 +67,7 @@ func reapOrphans(ctx context.Context, panes []tmuxPane) {
 		missStreak[p.Name]++
 		if missStreak[p.Name] >= reapStrikes {
 			// "="+name 精确名匹配,杜绝前缀误杀(如 cc-a 误中 cc-ab);kill 受 ctx 约束,关服即取消。
-			_ = exec.CommandContext(ctx, "tmux", "kill-session", "-t", "="+p.Name).Run()
+			_ = tmuxCmd("kill-session", "-t", "="+p.Name).Run() // 统一走 tmuxCmd:环境注入/进程属性一致(盲区#2)
 			delete(missStreak, p.Name)
 		}
 	}

@@ -24,15 +24,18 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"golang.org/x/crypto/nacl/box"
 
+	"github.com/jsdvjx/ccfly/go/internal/control"
 	"github.com/jsdvjx/ccfly/go/internal/mesh"
 )
 
@@ -41,6 +44,7 @@ func runClaude(args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--email <e>] [--node <ip>] [--egress <v6>] [--host <cloud>]")
 		fmt.Fprintln(os.Stderr, "       ccfly claude logout [--host <cloud>]")
+		fmt.Fprintln(os.Stderr, "       ccfly claude status [--host <cloud>]")
 		return nil
 	}
 	switch args[0] {
@@ -48,8 +52,10 @@ func runClaude(args []string) error {
 		return runClaudeLogin(args[1:])
 	case "logout":
 		return runClaudeLogout(args[1:])
+	case "status":
+		return runClaudeStatus(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand: ccfly claude %s (try: login | logout)", args[0])
+		return fmt.Errorf("unknown subcommand: ccfly claude %s (try: login | logout | status)", args[0])
 	}
 }
 
@@ -59,6 +65,7 @@ func runClaudeLogin(args []string) error {
 	node := fs.String("node", "", "out node overlay IP (omit to reuse the account's provisioned egress)")
 	egress := fs.String("egress", "", "egress /128 (omit to reuse)")
 	host := fs.String("host", "", "cloud host (default: the only enrolled cloud)")
+	bg := fs.Bool("_bg", false, "")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--email <e>] [--node <ip>] [--egress <v6>] [--host <cloud>]")
 		fmt.Fprintln(os.Stderr, "  省略 --email:云端自动选号(共享账号里按 claude 用量 + 分配次数挑一个)。")
@@ -71,56 +78,267 @@ func runClaudeLogin(args []string) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 11*time.Minute) // 略大于 job TTL(10min)
-	defer cancel()
+	if *bg {
+		return runClaudeLoginBackground(tgt, strings.TrimSpace(*email), strings.TrimSpace(*node), strings.TrimSpace(*egress))
+	}
+	return forkLoginBackground(tgt, strings.TrimSpace(*email), strings.TrimSpace(*node), strings.TrimSpace(*egress))
+}
 
-	started, err := loginStart(ctx, tgt, strings.TrimSpace(*email), strings.TrimSpace(*node), strings.TrimSpace(*egress))
-	if err != nil {
-		return err
-	}
-	// account_email 留空时由云端选号:start 已回带分配结果,显示出来让用户知道登的是哪个账号。
-	if started.AccountEmail != "" {
-		fmt.Fprintf(os.Stderr, "ccfly: 登录任务 %s 已发起(账号 %s,出口 %s)。轮询中…(若为新账号,请到 cc.hn 控制台提交邮箱验证码)\n",
-			started.JobID, started.AccountEmail, started.EgressV6)
-	} else {
-		fmt.Fprintf(os.Stderr, "ccfly: 登录任务 %s 已发起。轮询中…(若为新账号,请到 cc.hn 控制台提交邮箱验证码)\n", started.JobID)
-	}
-
-	res, err := loginPoll(ctx, tgt, started.JobID)
-	if err != nil {
-		return err
-	}
-	plain, err := openSealed(tgt, res.CiphertextB64)
-	if err != nil {
-		return fmt.Errorf("解密凭证失败(设备 WG 私钥与封装公钥不匹配?): %w", err)
-	}
-	path, err := writeCredentials(plain)
-	if err != nil {
-		return err
-	}
-	_ = loginAck(ctx, tgt, started.JobID) // best-effort:确认落地 → 云端抹除密文
-
-	// 最终的分配结果以 poll 为准(succeeded 的 job 一定带齐),回退到 start 的值。
-	acct := firstNonEmpty(res.AccountEmail, started.AccountEmail, strings.TrimSpace(*email))
-	v6 := firstNonEmpty(res.EgressV6, started.EgressV6)
-	outIP := firstNonEmpty(res.OutNodeIP, started.OutNodeIP, strings.TrimSpace(*node))
-
-	// 落盘「按账号 /128 路由」上下文:本机后续 claude 会话据此优先从该账号的 /128 出网
-	// (实际接通取决于云端是否下发可用的按账号代理 URL,见 mesh.ClaudeLoginContext 注释;
-	//  缺则 EnsureTmuxProxyEnv 安全回退设备级 overlay 代理)。
-	if acct != "" || v6 != "" {
-		if e := mesh.SaveClaudeLoginContext(mesh.ClaudeLoginContext{
-			Host: tgt.Host, AccountEmail: acct, EgressV6: v6, OutNodeIP: outIP,
-			ProxyURL: res.AccountProxyURL, // 云端下发的按账号 /128 出网代理 → EnsureTmuxProxyEnv 用它
-		}); e != nil {
-			fmt.Fprintf(os.Stderr, "ccfly: 警告:保存登录上下文失败(不影响本次登录): %v\n", e)
+func forkLoginBackground(tgt mesh.LoginTarget, email, node, egress string) error {
+	if s, _ := mesh.LoadLoginStatus(); s != nil && !s.Terminal() && s.PID > 0 {
+		if processRunning(s.PID) {
+			fmt.Fprintf(os.Stderr, "ccfly: 已有后台登录进程在运行 (PID %d)，用 `ccfly claude status` 查看进度。\n", s.PID)
+			return nil
 		}
 	}
 
-	if v6 != "" {
-		fmt.Fprintf(os.Stderr, "✓ 已登录 %s(出口 %s)— 凭证写入 %s\n", acct, v6, path)
-	} else {
-		fmt.Fprintf(os.Stderr, "✓ 已登录 %s — 凭证写入 %s\n", acct, path)
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot find self executable: %w", err)
+	}
+	cliArgs := []string{"claude", "login", "--_bg", "--host", tgt.Host}
+	if email != "" {
+		cliArgs = append(cliArgs, "--email", email)
+	}
+	if node != "" {
+		cliArgs = append(cliArgs, "--node", node)
+	}
+	if egress != "" {
+		cliArgs = append(cliArgs, "--egress", egress)
+	}
+
+	home, _ := os.UserHomeDir()
+	logPath := filepath.Join(home, ".ccfly", "claude-login.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("cannot create log file: %w", err)
+	}
+
+	cmd := exec.Command(self, cliArgs...)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	setSysProcDetach(cmd)
+	if err := cmd.Start(); err != nil {
+		logFile.Close()
+		return fmt.Errorf("failed to start background login: %w", err)
+	}
+	logFile.Close()
+
+	_ = mesh.SaveLoginStatus(mesh.LoginStatus{
+		Phase:     mesh.LoginPhaseInit,
+		Host:      tgt.Host,
+		Email:     email,
+		PID:       cmd.Process.Pid,
+		StartedAt: time.Now().Unix(),
+	})
+
+	fmt.Fprintf(os.Stderr, "ccfly: 登录任务已在后台启动 (PID %d)\n", cmd.Process.Pid)
+	fmt.Fprintf(os.Stderr, "  用 `ccfly claude status` 查看进度;日志: %s\n", logPath)
+	return nil
+}
+
+func runClaudeLoginBackground(tgt mesh.LoginTarget, email, node, egress string) error {
+	preserveStartedAt := func() int64 {
+		if prev, _ := mesh.LoadLoginStatus(); prev != nil && prev.StartedAt > 0 {
+			return prev.StartedAt
+		}
+		return time.Now().Unix()
+	}
+	startedAt := preserveStartedAt()
+
+	updateStatus := func(phase, cloudStatus, errMsg, jobID, acctEmail, egressV6 string) {
+		_ = mesh.SaveLoginStatus(mesh.LoginStatus{
+			Phase:       phase,
+			JobID:       jobID,
+			Email:       acctEmail,
+			EgressV6:    egressV6,
+			Host:        tgt.Host,
+			PID:         os.Getpid(),
+			Error:       errMsg,
+			StartedAt:   startedAt,
+			CloudStatus: cloudStatus,
+		})
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	defer cancel()
+
+	updateStatus(mesh.LoginPhaseCheckChannel, "", "", "", email, "")
+	if err := waitForChannel(ctx, tgt, email, updateStatus); err != nil {
+		updateStatus(mesh.LoginPhaseFailed, "", err.Error(), "", email, "")
+		return err
+	}
+
+	updateStatus(mesh.LoginPhaseStarting, "", "", "", email, "")
+	var started loginStartResp
+	startBackoff := 5 * time.Second
+	for {
+		var startErr error
+		started, startErr = loginStart(ctx, tgt, email, node, egress)
+		if startErr == nil {
+			break
+		}
+		if strings.Contains(startErr.Error(), "HTTP 409") {
+			log.Printf("ccfly-bg: login start 409, retrying in %s", startBackoff)
+			updateStatus(mesh.LoginPhaseWaitChannel, "", "通道被占用,等待重试", "", email, "")
+			select {
+			case <-ctx.Done():
+				updateStatus(mesh.LoginPhaseFailed, "", ctx.Err().Error(), "", email, "")
+				return ctx.Err()
+			case <-time.After(startBackoff):
+			}
+			if startBackoff < 30*time.Second {
+				startBackoff *= 2
+			}
+			continue
+		}
+		updateStatus(mesh.LoginPhaseFailed, "", startErr.Error(), "", email, "")
+		return startErr
+	}
+
+	acct := started.AccountEmail
+	if acct == "" {
+		acct = email
+	}
+	log.Printf("ccfly-bg: login job %s started (account %s, egress %s)", started.JobID, acct, started.EgressV6)
+	updateStatus(mesh.LoginPhasePolling, "pending", "", started.JobID, acct, started.EgressV6)
+
+	res, err := loginPoll(ctx, tgt, started.JobID)
+	if err != nil {
+		updateStatus(mesh.LoginPhaseFailed, "", err.Error(), started.JobID, acct, started.EgressV6)
+		return err
+	}
+
+	updateStatus(mesh.LoginPhaseDecrypting, "succeeded", "", started.JobID, acct, started.EgressV6)
+	plain, err := openSealed(tgt, res.CiphertextB64)
+	if err != nil {
+		updateStatus(mesh.LoginPhaseFailed, "", fmt.Sprintf("解密凭证失败: %v", err), started.JobID, acct, started.EgressV6)
+		return err
+	}
+
+	updateStatus(mesh.LoginPhaseWriting, "succeeded", "", started.JobID, acct, started.EgressV6)
+	path, err := writeCredentials(plain)
+	if err != nil {
+		updateStatus(mesh.LoginPhaseFailed, "", err.Error(), started.JobID, acct, started.EgressV6)
+		return err
+	}
+	control.TrustFolder("") // 凭证有了还不够:标记 TUI 首启引导已完成(dir 空=只 onboarding),否则新设备起会话被引导界面挡住
+
+	_ = loginAck(ctx, tgt, started.JobID)
+
+	finalAcct := firstNonEmpty(res.AccountEmail, started.AccountEmail, email)
+	v6 := firstNonEmpty(res.EgressV6, started.EgressV6)
+	outIP := firstNonEmpty(res.OutNodeIP, started.OutNodeIP, node)
+
+	if finalAcct != "" || v6 != "" {
+		_ = mesh.SaveClaudeLoginContext(mesh.ClaudeLoginContext{
+			Host: tgt.Host, AccountEmail: finalAcct, EgressV6: v6, OutNodeIP: outIP,
+			ProxyURL: res.AccountProxyURL,
+		})
+	}
+
+	updateStatus(mesh.LoginPhaseSucceeded, "succeeded", "", started.JobID, finalAcct, v6)
+	log.Printf("ccfly-bg: login succeeded: %s (egress %s), credentials written to %s", finalAcct, v6, path)
+	return nil
+}
+
+type channelStatusResp struct {
+	Occupied  bool   `json:"occupied"`
+	Source    string `json:"source"`
+	Status    string `json:"status"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
+func checkChannelStatus(ctx context.Context, tgt mesh.LoginTarget, email string) (channelStatusResp, error) {
+	var resp channelStatusResp
+	q := url.Values{"email": {email}}
+	if err := loginDo(ctx, tgt, http.MethodGet, "/api/device/login/channel-status", q, nil, &resp); err != nil {
+		return channelStatusResp{}, err
+	}
+	return resp, nil
+}
+
+func waitForChannel(ctx context.Context, tgt mesh.LoginTarget, email string, updateFn func(phase, cloudStatus, errMsg, jobID, email, egress string)) error {
+	if email == "" {
+		return nil
+	}
+	backoff := 5 * time.Second
+	for {
+		status, err := checkChannelStatus(ctx, tgt, email)
+		if err != nil {
+			log.Printf("ccfly-bg: channel check failed (proceeding): %v", err)
+			return nil
+		}
+		if !status.Occupied {
+			return nil
+		}
+		log.Printf("ccfly-bg: channel occupied by %s (%s), waiting %s", status.Source, status.Status, backoff)
+		updateFn(mesh.LoginPhaseWaitChannel, status.Status, fmt.Sprintf("通道被 %s 占用 (%s)", status.Source, status.Status), "", email, "")
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+func runClaudeStatus(args []string) error {
+	s, err := mesh.LoadLoginStatus()
+	if err != nil {
+		return err
+	}
+	if s == nil {
+		fmt.Fprintln(os.Stderr, "ccfly: 没有进行中的登录任务。")
+		return nil
+	}
+
+	alive := s.PID > 0 && processRunning(s.PID)
+
+	labels := map[string]string{
+		mesh.LoginPhaseInit:         "初始化",
+		mesh.LoginPhaseCheckChannel: "检查通道",
+		mesh.LoginPhaseWaitChannel:  "等待通道空闲",
+		mesh.LoginPhaseStarting:     "发起登录",
+		mesh.LoginPhasePolling:      "轮询中",
+		mesh.LoginPhaseDecrypting:   "解密凭证",
+		mesh.LoginPhaseWriting:      "写入凭证",
+		mesh.LoginPhaseSucceeded:    "已完成",
+		mesh.LoginPhaseFailed:       "失败",
+	}
+	label := labels[s.Phase]
+	if label == "" {
+		label = s.Phase
+	}
+
+	fmt.Fprintf(os.Stderr, "状态: %s", label)
+	if !alive && !s.Terminal() {
+		fmt.Fprint(os.Stderr, " (进程已退出)")
+	}
+	fmt.Fprintln(os.Stderr)
+	if s.Host != "" {
+		fmt.Fprintf(os.Stderr, "云端: %s\n", s.Host)
+	}
+	if s.Email != "" {
+		fmt.Fprintf(os.Stderr, "账号: %s\n", s.Email)
+	}
+	if s.JobID != "" {
+		fmt.Fprintf(os.Stderr, "任务: %s\n", s.JobID)
+	}
+	if s.EgressV6 != "" {
+		fmt.Fprintf(os.Stderr, "出口: %s\n", s.EgressV6)
+	}
+	if s.CloudStatus != "" {
+		fmt.Fprintf(os.Stderr, "云端状态: %s%s\n", s.CloudStatus, awaitHint(s.CloudStatus))
+	}
+	if s.Error != "" {
+		fmt.Fprintf(os.Stderr, "错误: %s\n", s.Error)
+	}
+	if s.UpdatedAt > 0 {
+		ago := time.Since(time.Unix(s.UpdatedAt, 0)).Truncate(time.Second)
+		fmt.Fprintf(os.Stderr, "更新: %s 前\n", ago)
 	}
 	return nil
 }
