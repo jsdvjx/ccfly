@@ -50,6 +50,56 @@ func jsonlLines(r io.Reader) iter.Seq[[]byte] {
 	}
 }
 
+// scanLineCap 是**摘要扫描**(scanOneSession)的单行保留上限。摘要只需 role/kind/preview/counts;
+// claude 会话偶发的超大行(内联 base64 图、巨型 tool_result,可达数十~上百 MB)若整行读进内存,在
+// /sessions 并发扫描下会 ×并发数 放大到数 GB(2026-07:单机 315 并发把 ccfly 顶到 8G、拖垮整机的实案)。
+// 故摘要路径给单行设上限。全文渲染(transcript/subagents/图片)仍走无上限的 jsonlLines,不受影响。
+const scanLineCap = 1 << 20 // 1 MiB:足够解析正常消息元数据,截掉病态大行
+
+// jsonlLinesCapped 与 jsonlLines 同语义,但单行最多保留 max 字节:超限行只保留前 max 字节(json 多半
+// 解析失败 → 调用方跳过该行),其余字节继续读走丢弃以推进到下一行——**关键:不丢失后续行**,保持
+// jsonlLines 的不变量。仅供摘要扫描(scanOneSession)用;需要整行内容的场景用 jsonlLines。
+func jsonlLinesCapped(r io.Reader, max int) iter.Seq[[]byte] {
+	return func(yield func([]byte) bool) {
+		br := bufio.NewReaderSize(r, 64<<10)
+		for {
+			line, err := readLineCapped(br, max)
+			if n := len(line); n > 0 {
+				for n > 0 && (line[n-1] == '\n' || line[n-1] == '\r') {
+					n--
+				}
+				if n > 0 && !yield(line[:n]) {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+}
+
+// readLineCapped 读到下一个 '\n'(含)为止,但只保留前 max 字节;超出部分继续从 br 读走并丢弃,使
+// 读取推进到下一行(否则超大行会破坏「不丢后续行」不变量)。err 语义同 bufio.ReadBytes:nil=读到 \n,
+// io.EOF=末尾无 \n 的半截行,其它=读错误。返回 buf 为新分配的拷贝,调用方可安全持有。
+func readLineCapped(br *bufio.Reader, max int) ([]byte, error) {
+	var buf []byte
+	for {
+		chunk, err := br.ReadSlice('\n') // chunk 是 br 内部缓冲的视图,下次读前必须拷走
+		if len(buf) < max {
+			if room := max - len(buf); len(chunk) > room {
+				buf = append(buf, chunk[:room]...)
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		if err == bufio.ErrBufferFull {
+			continue // 本行超过 bufio 缓冲、还没到 \n:继续读(已按预算保留/丢弃)
+		}
+		return buf, err // nil(遇到 \n)或 EOF/其它
+	}
+}
+
 // claudeSnapshot 是单个 Claude 会话的进度快照(本地扫描用)。
 type claudeSnapshot struct {
 	SessionID string `json:"session_id"`
@@ -82,28 +132,73 @@ var (
 	scanMu    sync.Mutex // 守 scanCache;仅护 map 读写,绝不跨 scanOneSession(磁盘/解析)持有
 	scanCache = map[string]scanCacheEntry{}
 
-	memoMu    sync.Mutex // 守整轮结果 memo(与 scanMu 独立)
-	memoSnaps []claudeSnapshot
-	memoAt    time.Time
+	memoMu       sync.Mutex // 守整轮结果 memo + scanInflight(与 scanMu 独立)
+	memoSnaps    []claudeSnapshot
+	memoAt       time.Time
+	scanInflight *scanCall // 非 nil = 已有一轮全量扫描在跑;后到的并发调用等它、共享结果(single-flight)
 )
 
 // memoTTL 远小于 useSessions 的 5s 轮询:只合并「同一刻多端点扇出」,绝不放陈旧。
 const memoTTL = 800 * time.Millisecond
 
-// scanClaudeSessions 扫描 <claudeProjectsDir>/**/*.jsonl,每个会话出一个快照。
-// 经 (mtime+size) 逐文件缓存 + 一个短整轮 memo 加速:idle 会话复用上次解析,只有变动/新增的
-// 文件才付全行扫描;并发端点调用安全(锁只护 map/slice,绝不跨磁盘 I/O)。
+// scanCall 是一轮进行中的全量扫描的共享句柄:leader 跑扫描,期间到达的调用方 <-done 后读同一份结果,
+// 避免 N 个并发请求各自全量解析全部会话 jsonl → 峰值内存 ×N 放大(2026-07:单机 315 并发 /sessions
+// 把 ccfly 顶到 8G、swap 抖动拖垮整机的根因)。
+type scanCall struct {
+	done  chan struct{}
+	snaps []claudeSnapshot
+	err   error
+}
+
+// scanClaudeSessions 扫描 <claudeProjectsDir>/**/*.jsonl,每个会话出一个快照。三层挡并发/重扫:
+// ① 800ms 整轮 memo 快路径(窗口内多端点 /sessions + resolveSessionParam×N + /sse 共用一次结果);
+// ② single-flight:一轮扫描进行中,后到者等它共享结果、绝不自己再全量扫一遍;③(leader 内)按
+// (mtime+size) 逐文件缓存,只有变动/新增文件才付全行扫描。返回值恒为拷贝,绝不外泄内部切片。
 func scanClaudeSessions() ([]claudeSnapshot, error) {
-	// 0) 整轮 memo 快路径:窗口内多端点(/sessions + resolveSessionParam×N + /sse)共用一次结果。
-	//    返回拷贝——绝不外泄内部切片(并发调用方可能各自处理)。
 	memoMu.Lock()
+	// ① memo 快路径。
 	if memoSnaps != nil && time.Since(memoAt) < memoTTL {
 		out := append([]claudeSnapshot(nil), memoSnaps...)
 		memoMu.Unlock()
 		return out, nil
 	}
+	// ② single-flight:已有一轮在跑 → 等它、共享结果。
+	if c := scanInflight; c != nil {
+		memoMu.Unlock()
+		<-c.done
+		return append([]claudeSnapshot(nil), c.snaps...), c.err
+	}
+	// 成为 leader:登记在跑,锁外做重活(见 doScanClaudeSessions)。
+	c := &scanCall{done: make(chan struct{})}
+	scanInflight = c
 	memoMu.Unlock()
 
+	var completed bool
+	defer func() {
+		memoMu.Lock()
+		if completed && c.err == nil { // 仅正常完成且无错时刷新 memo(panic/出错不缓存)
+			memoSnaps, memoAt = append([]claudeSnapshot(nil), c.snaps...), time.Now()
+		}
+		scanInflight = nil
+		memoMu.Unlock()
+		close(c.done) // 唤醒所有等待者
+	}()
+
+	if scanBarrier != nil {
+		scanBarrier() // 测试 seam(生产为 nil):在此卡住 leader 制造「扫描进行中」窗口以验证 single-flight
+	}
+	c.snaps, c.err = doScanClaudeSessions()
+	completed = true
+	return append([]claudeSnapshot(nil), c.snaps...), c.err
+}
+
+// scanBarrier 是仅供测试的 seam:非 nil 时由 leader 在真扫描前调用一次(生产恒为 nil,无开销)。
+var scanBarrier func()
+
+// doScanClaudeSessions 跑一轮真正的全量扫描(在锁外,由 scanClaudeSessions 的 leader 调用一次);
+// 并发协调(memo / single-flight)全在 scanClaudeSessions,这里只管扫。逐文件 (mtime+size) 缓存复用
+// idle 会话,只有变动/新增文件付全行扫描。
+func doScanClaudeSessions() ([]claudeSnapshot, error) {
 	root := claudeProjectsDir()
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -133,10 +228,6 @@ func scanClaudeSessions() ([]claudeSnapshot, error) {
 		}
 	}
 	pruneScanCache(seen)
-
-	memoMu.Lock()
-	memoSnaps, memoAt = append([]claudeSnapshot(nil), out...), time.Now()
-	memoMu.Unlock()
 	return out, nil
 }
 
@@ -209,7 +300,7 @@ func scanOneSession(path string) (claudeSnapshot, bool) {
 	defer fh.Close()
 
 	snap := claudeSnapshot{SessionID: strings.TrimSuffix(filepath.Base(path), ".jsonl")}
-	for line := range jsonlLines(fh) { // 无上限逐行(超大行不截断;见 jsonlLines)
+	for line := range jsonlLinesCapped(fh, scanLineCap) { // 摘要:单行设上限防并发扫描内存放大(见 scanLineCap)
 		var ev rawEvent
 		if json.Unmarshal(line, &ev) != nil {
 			continue
