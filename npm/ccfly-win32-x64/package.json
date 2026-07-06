@@ -1,6 +1,6 @@
 {
   "name": "ccfly-win32-x64",
-  "version": "0.10.9",
+  "version": "0.10.10",
   "description": "Prebuilt ccfly Go binary for Windows x64.",
   "license": "MIT",
   "os": [
