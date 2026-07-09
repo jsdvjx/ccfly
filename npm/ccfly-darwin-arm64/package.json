@@ -1,6 +1,6 @@
 {
   "name": "ccfly-darwin-arm64",
-  "version": "0.10.10",
+  "version": "0.10.11",
   "description": "Prebuilt ccfly Go binary for darwin/arm64 (Apple Silicon).",
   "license": "MIT",
   "os": [

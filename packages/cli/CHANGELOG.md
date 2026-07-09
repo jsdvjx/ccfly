@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.10.11
+
+### Patch Changes
+
+- 新增 POST /close 批量关闭会话(释放 CPU/内存);/sessions 透出 bytes 字段;内部功能准入闸。
+
 ## 0.10.10
 
 ### Patch Changes
