@@ -78,6 +78,12 @@ func runClaudeLogin(args []string) error {
 		return err
 	}
 
+	// 内部功能门控:云端 device/config 明确下发 can_use_claude=false 时,本机不暴露 claude 登录
+	// (未登录 / 不在准入组)。nil=未知(老云端/未刷新)一律放行。真正鉴权仍在云端(会 403)。
+	if !mesh.ClaudeLoginAllowed(tgt.Host) {
+		return fmt.Errorf("该账号未获授权使用 Claude 账号功能(内部功能);请联系管理员将你加入准入用户组")
+	}
+
 	if *bg {
 		return runClaudeLoginBackground(tgt, strings.TrimSpace(*email), strings.TrimSpace(*node), strings.TrimSpace(*egress))
 	}

@@ -116,6 +116,7 @@ type claudeSnapshot struct {
 	Preview   string `json:"preview"`
 	State     string `json:"state"`   // working / awaiting_input / idle / error / closed / unknown
 	AgeSec    int64  `json:"age_sec"` // 距最后活动秒数
+	Bytes     int64  `json:"bytes"`   // jsonl 文件字节数(会话大小);资源占用/resume 冷加载耗时与之强相关,前端据此判该关哪个
 }
 
 // ── 扫描缓存(claudecache):按 mtime+size 免重扫 idle 会话 ───────────────────────
@@ -250,6 +251,7 @@ func cachedScanOne(path string, mtimeNs, size int64) (claudeSnapshot, bool) {
 	scanMu.Unlock()
 
 	snap, ok := scanOneSession(path) // 只在文件变了时付费;两 goroutine 同时 miss 同文件无害(幂等)
+	snap.Bytes = size                // 文件字节数(会话大小);size 已由 ReadDir 的 stat 得到,零额外 syscall
 	scanMu.Lock()
 	scanCache[path] = scanCacheEntry{mtimeNs: mtimeNs, size: size, snap: snap, ok: ok}
 	scanMu.Unlock()

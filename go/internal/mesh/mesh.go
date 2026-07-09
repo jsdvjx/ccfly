@@ -57,6 +57,12 @@ type State struct {
 	// 出口若做 MITM,设备需信任其 CA。云端把所有出口的 CA 合成一个 PEM bundle 下发,设备落盘到
 	// ~/.ccfly/proxy-ca.pem 并给会话注入 NODE_EXTRA_CA_CERTS(见 applyProxyCA)。
 	ProxyCA string `json:"proxy_ca,omitempty"`
+	// 云端下发的「内部功能准入」标志(claude 账号 / 代理 / 组网)。三态指针:nil=未知(老云端/老
+	// State 没这字段)→ 一律按「允许」处理,绝不误伤未开闸的部署;显式 false 才在设备侧「不暴露」
+	// 相关命令(见 cmd/ccfly 的 claude 门控)。真正鉴权仍在云端(端点 403),这里只是本地 UX。
+	CanUseClaude *bool `json:"can_use_claude,omitempty"`
+	CanUseProxy  *bool `json:"can_use_proxy,omitempty"`
+	CanUseMesh   *bool `json:"can_use_mesh,omitempty"`
 }
 
 // connectResp mirrors ccfly-cloud's POST /connect response.
@@ -511,12 +517,25 @@ func refreshConfig(ctx context.Context, st *State) {
 		ProxyPort      int    `json:"proxy_port"`
 		ProxyScheme    string `json:"proxy_scheme"`
 		ProxyCA        string `json:"proxy_ca"`
+		CanUseClaude   *bool  `json:"can_use_claude"`
+		CanUseProxy    *bool  `json:"can_use_proxy"`
+		CanUseMesh     *bool  `json:"can_use_mesh"`
 	}
 	if err := json.Unmarshal(data, &c); err != nil {
 		log.Printf("ccfly: device config refresh: bad JSON: %v", err)
 		return
 	}
 	changed := false
+	// 内部功能准入标志:云端下发才更新(nil=老云端没发,保持既有值不动)。
+	if c.CanUseClaude != nil && !sameBool(st.CanUseClaude, c.CanUseClaude) {
+		st.CanUseClaude, changed = c.CanUseClaude, true
+	}
+	if c.CanUseProxy != nil && !sameBool(st.CanUseProxy, c.CanUseProxy) {
+		st.CanUseProxy, changed = c.CanUseProxy, true
+	}
+	if c.CanUseMesh != nil && !sameBool(st.CanUseMesh, c.CanUseMesh) {
+		st.CanUseMesh, changed = c.CanUseMesh, true
+	}
 	if c.CloudPublicKey != "" && c.CloudPublicKey != st.CloudPublicKey {
 		st.CloudPublicKey, changed = c.CloudPublicKey, true
 	}
@@ -805,6 +824,26 @@ func LoginTargets() []LoginTarget {
 		})
 	}
 	return out
+}
+
+// sameBool 比较两个三态布尔指针(nil 视为「未设」)。
+func sameBool(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// ClaudeLoginAllowed 读某云端持久化的「内部功能准入」标志(can_use_claude),判断本机是否应
+// 暴露 `ccfly claude login`。语义:仅当云端**明确**下发 false 时才拒绝;nil(老云端 / 尚未刷新
+// device/config)一律放行,绝不误伤未开闸的部署。真正鉴权仍在云端(login/start 返回 403),
+// 此处只是本地「不暴露命令」的纵深防御 / 更友好的即时报错。
+func ClaudeLoginAllowed(host string) bool {
+	st, err := loadState(host)
+	if err != nil || st == nil || st.CanUseClaude == nil {
+		return true
+	}
+	return *st.CanUseClaude
 }
 
 // ── claude login context: 按账号 /128 路由(~/.ccfly/claude-login.json,按 host 区分)──

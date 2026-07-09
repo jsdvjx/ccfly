@@ -29,6 +29,7 @@ package control
 //   GET  /info                会话信息(模型/上下文用量/累计 token)
 //   GET  /term                自带网页终端 WebSocket(PTY+tmux,ttyd 帧兼容;去外部 ttyd 依赖)
 //   GET  /sessions            落地页会话列表(@ccfly/react SessionMeta[] 形状)
+//   POST /close               关闭一批会话:kill 其 tmux 释放 CPU/内存(留 jsonl 可 resume;守卫在用/在跑/待决,见 close.go)
 //   GET  /                     内嵌 web 表世界 SPA(兜底;静态文件 + history 回退 index.html)
 
 import (
@@ -107,6 +108,7 @@ func Handler() http.Handler {
 	mux.HandleFunc("POST /new", handleNew)                 // 新建会话:在指定 cwd detached 起全新 claude,轮询 panemap 回真 sid
 	mux.HandleFunc("POST /reload", handleReload)           // 重载会话:杀 tmux 再以 claude --resume 重建(可注入新 env_vars)
 	mux.HandleFunc("POST /takeover", handleTakeover)       // 接管:杀掉会话既有 claude 进程,随后 /term 重建进 tmux(见 takeover.go)
+	mux.HandleFunc("POST /close", handleClose)             // 关闭:kill 一批会话的 tmux 释放资源(留 jsonl 可 resume;守卫 attached/busy/select,见 close.go)
 	mux.HandleFunc("POST /upload", handleUpload)           // 表世界图片/文件上传 → 落盘会话 cwd 的 .ccfly-uploads/(见 upload.go)
 	mux.HandleFunc("GET /term", handleTerm)                // 自带网页终端 WS(ttyd 兼容);去外部 ttyd 依赖
 	mux.HandleFunc("GET /sessions", handleSessions)        // 落地页会话列表(SessionMeta[] 形状)

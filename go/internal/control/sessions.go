@@ -13,6 +13,7 @@ package control
 //   age_sec   距最后活动秒数(scanClaudeSessions 已算)
 //   preview   末条消息短预览
 //   live      该会话是否有同名 tmux 会话在跑(默认 tmuxName: "cc-"+sid[:8])
+//   bytes     jsonl 文件字节数(会话大小;「关闭会话」弹窗据此展示大小/提示大会话 resume 慢)
 //
 // 排序:按 last_ts 倒序(最近活动在前),与 Jarvis web 的会话列表一致。
 //
@@ -41,6 +42,9 @@ type sessionRow struct {
 	AgeSec    int64  `json:"age_sec"`
 	Preview   string `json:"preview,omitempty"`
 	Live      bool   `json:"live"`
+	// Bytes:该会话 jsonl 文件字节数(会话大小)。表世界的「关闭会话」弹窗据此展示大小、
+	// 提示「大会话 resume 冷加载慢」,帮用户决定该关哪个(占资源的正是这些大会话)。
+	Bytes int64 `json:"bytes,omitempty"`
 	// chat 视图隐藏终端「自适应现有 tmux 尺寸」用:有客户端在连(attached>0)就沿用 cols/rows,不 resize。
 	Cols     int `json:"cols,omitempty"`
 	Rows     int `json:"rows,omitempty"`
@@ -90,6 +94,7 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 			Preview:   s.Preview,
 			Live:      live[s.SessionID],
 			AttnKind:  attn[s.SessionID],
+			Bytes:     s.Bytes,
 		}
 		// 该会话当前在跑的 pane(扛 /clear)→ 透出尺寸 + attach 数,供 chat 隐藏终端自适应;
 		// 顺带透出真实 tmux 会话名(表世界直接展示)。
