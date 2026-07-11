@@ -1,7 +1,7 @@
 package control
 
 // claudescan.go — 扫描本地 Claude 会话 jsonl 派生进度快照,以及被 transcript / info /
-// subagents / workflow 共用的底层解析(rawEvent / contentKindPreview / scanOneSession 等)。
+// subagents / workflow 共用的底层解析(rawEvent / contentKindPreview / scanSession 等)。
 //
 // 纯本地实现:不向任何云端上报,只做本地扫描 + 共享解析原语。
 // claudeProjectsDir 在 config.go(可被 --claude-dir / CCFLY_CLAUDE_DIR 覆盖)。
@@ -50,53 +50,38 @@ func jsonlLines(r io.Reader) iter.Seq[[]byte] {
 	}
 }
 
-// scanLineCap 是**摘要扫描**(scanOneSession)的单行保留上限。摘要只需 role/kind/preview/counts;
+// scanLineCap 是**摘要扫描**(scanSession→applyEvent)的单行保留上限。摘要只需 role/kind/preview/counts;
 // claude 会话偶发的超大行(内联 base64 图、巨型 tool_result,可达数十~上百 MB)若整行读进内存,在
 // /sessions 并发扫描下会 ×并发数 放大到数 GB(2026-07:单机 315 并发把 ccfly 顶到 8G、拖垮整机的实案)。
 // 故摘要路径给单行设上限。全文渲染(transcript/subagents/图片)仍走无上限的 jsonlLines,不受影响。
 const scanLineCap = 1 << 20 // 1 MiB:足够解析正常消息元数据,截掉病态大行
 
-// jsonlLinesCapped 与 jsonlLines 同语义,但单行最多保留 max 字节:超限行只保留前 max 字节(json 多半
-// 解析失败 → 调用方跳过该行),其余字节继续读走丢弃以推进到下一行——**关键:不丢失后续行**,保持
-// jsonlLines 的不变量。仅供摘要扫描(scanOneSession)用;需要整行内容的场景用 jsonlLines。
-func jsonlLinesCapped(r io.Reader, max int) iter.Seq[[]byte] {
-	return func(yield func([]byte) bool) {
-		br := bufio.NewReaderSize(r, 64<<10)
-		for {
-			line, err := readLineCapped(br, max)
-			if n := len(line); n > 0 {
-				for n > 0 && (line[n-1] == '\n' || line[n-1] == '\r') {
-					n--
-				}
-				if n > 0 && !yield(line[:n]) {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}
-}
-
-// readLineCapped 读到下一个 '\n'(含)为止,但只保留前 max 字节;超出部分继续从 br 读走并丢弃,使
-// 读取推进到下一行(否则超大行会破坏「不丢后续行」不变量)。err 语义同 bufio.ReadBytes:nil=读到 \n,
-// io.EOF=末尾无 \n 的半截行,其它=读错误。返回 buf 为新分配的拷贝,调用方可安全持有。
-func readLineCapped(br *bufio.Reader, max int) ([]byte, error) {
-	var buf []byte
+// readLineAt 读到下一个 '\n'(含)为止,供**增量摘要扫描**按字节偏移续读用。返回:剥除尾部 \n/\r 的
+// 行内容(最多 max 字节;超限行只留前 max 字节 → json 多半解析失败被跳过,但**不丢后续行**);consumed=
+// 本行消耗的原始字节数(含被截断丢弃的溢出 + '\n');complete=是否读到了 '\n'(false=EOF 前的半截行,
+// 尚在追加写 → 调用方不处理、不推进偏移,下轮写完再读)。max 上限的病态大行背景见 scanLineCap。
+func readLineAt(br *bufio.Reader, max int) (line []byte, consumed int64, complete bool) {
 	for {
-		chunk, err := br.ReadSlice('\n') // chunk 是 br 内部缓冲的视图,下次读前必须拷走
-		if len(buf) < max {
-			if room := max - len(buf); len(chunk) > room {
-				buf = append(buf, chunk[:room]...)
+		chunk, err := br.ReadSlice('\n') // chunk 是 br 内部缓冲视图,下次读前拷走
+		consumed += int64(len(chunk))
+		if len(line) < max {
+			if room := max - len(line); len(chunk) > room {
+				line = append(line, chunk[:room]...)
 			} else {
-				buf = append(buf, chunk...)
+				line = append(line, chunk...)
 			}
 		}
 		if err == bufio.ErrBufferFull {
-			continue // 本行超过 bufio 缓冲、还没到 \n:继续读(已按预算保留/丢弃)
+			continue // 本行超 bufio 缓冲、还没到 \n:继续(已按预算保留/丢弃)
 		}
-		return buf, err // nil(遇到 \n)或 EOF/其它
+		if err != nil {
+			return line, consumed, false // EOF 等:本行无 '\n' = 半截行
+		}
+		n := len(line) // 读到 '\n':剥尾部 \n/\r
+		for n > 0 && (line[n-1] == '\n' || line[n-1] == '\r') {
+			n--
+		}
+		return line[:n], consumed, true
 	}
 }
 
@@ -119,18 +104,21 @@ type claudeSnapshot struct {
 	Bytes     int64  `json:"bytes"`   // jsonl 文件字节数(会话大小);资源占用/resume 冷加载耗时与之强相关,前端据此判该关哪个
 }
 
-// ── 扫描缓存(claudecache):按 mtime+size 免重扫 idle 会话 ───────────────────────
-// jsonl 是 append-only:任何新行都改 size(通常也改 mtime),故 (mtimeNs,size) 是充分缓存键。
-// 68 个会话里绝大多数每轮命中,O(ReadDir) 取代 O(读全部行);只有正在增长的 1~2 个文件重扫。
+// ── 扫描缓存(claudecache):按 mtime+size 免重扫 idle 会话,增长文件只读新尾 ─────────────
+// jsonl 是 append-only:任何新行都改 size(通常也改 mtime)。绝大多数 idle 会话每轮 (mtimeNs,size)
+// 命中,O(ReadDir) 取代 O(读全部行)。**正在增长的会话**过去每轮 miss → 重读整个文件(几百 MB 的活跃
+// 会话就是 ccfly CPU 高的根因);现改为**增量**:记住已消费到的行边界偏移 off,增长时只读 [off, size)
+// 的新尾、从上次快照累进(计数累加、last_* 取新尾),成本从「读全文」降到「读新增几 KB」。
 type scanCacheEntry struct {
 	mtimeNs int64
-	size    int64
+	size    int64 // 上次扫描时的文件字节数(命中判定 + 增量「是否增长」判定)
+	off     int64 // 已消费到的行边界字节偏移(末尾半截行不计入)——增量从此处续读
 	snap    claudeSnapshot
-	ok      bool // scanOneSession 的第二返回值(MsgCount==0 → false,仍缓存以免反复开空文件)
+	ok      bool // MsgCount>0;false 仍缓存以免反复开空文件
 }
 
 var (
-	scanMu    sync.Mutex // 守 scanCache;仅护 map 读写,绝不跨 scanOneSession(磁盘/解析)持有
+	scanMu    sync.Mutex // 守 scanCache;仅护 map 读写,绝不跨 scanSession(磁盘/解析)持有
 	scanCache = map[string]scanCacheEntry{}
 
 	memoMu       sync.Mutex // 守整轮结果 memo + scanInflight(与 scanMu 独立)
@@ -232,28 +220,38 @@ func doScanClaudeSessions() ([]claudeSnapshot, error) {
 	return out, nil
 }
 
-// cachedScanOne:mtime+size 命中则复用解析;否则锁外重扫并回填。
-// 重活(scanOneSession:开文件 + 全行 JSON)在锁外做,并发端点扫不同变动文件不互相阻塞。
+// cachedScanOne:①精确命中复用;②文件增长(append-only)只读新尾增量累进;③否则全量。
+// 重活(开文件 + JSON 解析)在锁外做,并发端点扫不同变动文件不互相阻塞。
 func cachedScanOne(path string, mtimeNs, size int64) (claudeSnapshot, bool) {
 	scanMu.Lock()
-	if e, hit := scanCache[path]; hit && e.mtimeNs == mtimeNs && e.size == size {
-		snap, ok := e.snap, e.ok // claudeSnapshot 是扁平值类型,拷贝出锁安全
-		scanMu.Unlock()
+	e, hit := scanCache[path]
+	scanMu.Unlock()
+
+	// ① 精确命中:文件未变,复用解析。State/AgeSec 是时变量(classify 按「距今 <120s」判 working),
+	//    会话停笔后文件冻结、不再 miss → 必须每次重算,否则停笔瞬间的 working 永久冻住不衰减成 idle
+	//    (/sessions 与 syncer 报陈旧 working 的根因)。只用已缓存字段重算,不重读文件,廉价。
+	if hit && e.mtimeNs == mtimeNs && e.size == size {
+		snap, ok := e.snap, e.ok // claudeSnapshot 扁平值类型,拷贝出锁安全
 		if ok {
-			// State/AgeSec 是时变量(classify 按「距今 <120s」判 working)。缓存按文件 (mtime,size)
-			// 命中,会话停笔后文件冻结、不再 miss → 必须每次重算,否则停笔瞬间的 working 永久冻住、
-			// 不衰减成 idle,/sessions 与 syncer 都报陈旧 working(状态对不上的根因)。重算只用已缓存
-			// 的内容字段(role/kind/preview/last_ts),不重读文件,廉价。
 			snap.AgeSec, snap.State = classify(snap.LastRole, snap.LastKind, snap.Preview, snap.LastTs)
 		}
 		return snap, ok
 	}
-	scanMu.Unlock()
 
-	snap, ok := scanOneSession(path) // 只在文件变了时付费;两 goroutine 同时 miss 同文件无害(幂等)
-	snap.Bytes = size                // 文件字节数(会话大小);size 已由 ReadDir 的 stat 得到,零额外 syscall
+	// ② 增量 vs ③ 全量。append-only 文件仅增长(size 变大且旧偏移仍落在文件内)→ 从上次快照续、只读
+	//    [off, EOF) 的新尾;否则(新文件 / 被 /clear 截断重写 size 变小 / 无缓存)→ 全量从头。
+	//    scanSession 已算好 classify;两条路径结果一致(计数累加、last_* 取新尾、首个 cwd 由 base 保留)。
+	var snap claudeSnapshot
+	var off int64
+	var ok bool
+	if hit && size > e.size && e.off >= 0 && e.off <= e.size {
+		snap, off, ok = scanSession(path, e.off, e.snap) // 增量
+	} else {
+		snap, off, ok = scanSession(path, 0, claudeSnapshot{}) // 全量
+	}
+	snap.Bytes = size // 文件字节数(会话大小);size 已由 ReadDir 的 stat 得到,零额外 syscall
 	scanMu.Lock()
-	scanCache[path] = scanCacheEntry{mtimeNs: mtimeNs, size: size, snap: snap, ok: ok}
+	scanCache[path] = scanCacheEntry{mtimeNs: mtimeNs, size: size, off: off, snap: snap, ok: ok}
 	scanMu.Unlock()
 	return snap, ok
 }
@@ -294,64 +292,99 @@ type rawEvent struct {
 	} `json:"message"`
 }
 
-func scanOneSession(path string) (claudeSnapshot, bool) {
+// scanSession 从 fromOff 处扫描 path、以 base 为起点累进,返回快照 + 已消费到的行边界偏移 + ok(有消息)。
+// fromOff==0 = 全量(base 传零值);fromOff>0 = 增量(base 传上次快照,只读新尾 [fromOff, EOF))。
+// 因 jsonl append-only:计数类累加、last_* 由新尾覆盖、首个 cwd 由 base 保留 → 增量与全量结果一致。
+func scanSession(path string, fromOff int64, base claudeSnapshot) (claudeSnapshot, int64, bool) {
 	fh, err := os.Open(path)
 	if err != nil {
-		return claudeSnapshot{}, false
+		return base, fromOff, base.MsgCount > 0
 	}
 	defer fh.Close()
 
-	snap := claudeSnapshot{SessionID: strings.TrimSuffix(filepath.Base(path), ".jsonl")}
-	for line := range jsonlLinesCapped(fh, scanLineCap) { // 摘要:单行设上限防并发扫描内存放大(见 scanLineCap)
-		var ev rawEvent
-		if json.Unmarshal(line, &ev) != nil {
-			continue
-		}
-		if ev.SessionID != "" {
-			snap.SessionID = ev.SessionID
-		}
-		// resume 按「第一个(原始)cwd」作用域:jsonl 落在 encode(初始 cwd) 的 project 目录下,
-		// cwd 漂移过的会话若用「最后的 cwd」去 claude --resume 会报 "No conversation found"。故取第一个。
-		if ev.Cwd != "" && snap.Cwd == "" {
-			snap.Cwd = ev.Cwd
-		}
-		if ev.GitBranch != "" {
-			snap.GitBranch = ev.GitBranch
-		}
-		if ev.Type == "ai-title" && ev.AiTitle != "" {
-			snap.Title = ev.AiTitle
-		}
-		// /rename 写入 custom-title 事件,优先级高于 ai-title
-		if ev.Type == "custom-title" && ev.CustomTitle != "" {
-			snap.Title = ev.CustomTitle
-		}
-		if ev.Message != nil && (ev.Type == "user" || ev.Type == "assistant") {
-			snap.MsgCount++
-			if ev.Timestamp != "" {
-				snap.LastTs = ev.Timestamp
-			}
-			snap.LastRole = ev.Message.Role
-			snap.LastKind, snap.Preview = contentKindPreview(ev.Message.Content)
-			// 用户真·提问轮数:排除工具结果回传(role=user 但 content 是 tool_result)
-			if ev.Type == "user" && snap.LastKind != "tool_result" {
-				snap.Turns++
-			}
-			if ev.Type == "assistant" {
-				if ev.Message.Model != "" {
-					snap.Model = shortModel(ev.Message.Model)
-				}
-				if u := ev.Message.Usage; u != nil {
-					// 当前上下文占用 ≈ 最后一条 assistant 的 input + 两类 cache(随会话推进取最新)
-					snap.Tokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
-				}
-			}
-		}
+	snap := base
+	if snap.SessionID == "" { // 全量起点:文件名兜底,遇到带 sessionId 的事件再覆盖
+		snap.SessionID = strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	}
+	off := scanFrom(fh, fromOff, &snap)
 	if snap.MsgCount == 0 {
-		return snap, false
+		return snap, off, false
 	}
 	snap.AgeSec, snap.State = classify(snap.LastRole, snap.LastKind, snap.Preview, snap.LastTs)
-	return snap, true
+	return snap, off, true
+}
+
+// scanFrom 从 fh 的 startOff 处逐行读,对每个**完整行**(以 \n 结尾)调用 applyEvent 累进 snap,返回读到
+// 的最后一个完整行之后的字节偏移(下次增量从此续)。末尾无 \n 的半截行(正在追加写)不处理、不推进偏移
+// → 下轮文件长大后从同一偏移把它当完整行读一次,不重不漏。
+// scanFromHook 是仅供测试的 seam:非 nil 时 scanFrom 入口以 startOff 调用一次(生产恒 nil,一次 nil 检查)。
+// 用于验证「增长文件走增量、从非零偏移续读」,不重读整文件。
+var scanFromHook func(startOff int64)
+
+func scanFrom(fh *os.File, startOff int64, snap *claudeSnapshot) int64 {
+	if scanFromHook != nil {
+		scanFromHook(startOff)
+	}
+	if _, err := fh.Seek(startOff, io.SeekStart); err != nil {
+		return startOff // 常规文件 seek 到有效偏移不会失败;万一失败则不推进(下轮 mtime 变会重来)
+	}
+	br := bufio.NewReaderSize(fh, 64<<10)
+	off := startOff
+	for {
+		line, consumed, complete := readLineAt(br, scanLineCap)
+		if !complete {
+			return off // EOF 或末尾半截行:停在最后一个完整行之后
+		}
+		applyEvent(snap, line)
+		off += consumed
+	}
+}
+
+// applyEvent 解析一行 jsonl 事件并累进 snap(全量/增量共用)。解析失败的行忽略(截断的超大行也落此)。
+func applyEvent(snap *claudeSnapshot, line []byte) {
+	var ev rawEvent
+	if json.Unmarshal(line, &ev) != nil {
+		return
+	}
+	if ev.SessionID != "" {
+		snap.SessionID = ev.SessionID
+	}
+	// resume 按「第一个(原始)cwd」作用域:jsonl 落在 encode(初始 cwd) 的 project 目录下,cwd 漂移过的
+	// 会话若用「最后的 cwd」去 claude --resume 会报 "No conversation found"。故取第一个(增量下由 base 保留)。
+	if ev.Cwd != "" && snap.Cwd == "" {
+		snap.Cwd = ev.Cwd
+	}
+	if ev.GitBranch != "" {
+		snap.GitBranch = ev.GitBranch
+	}
+	if ev.Type == "ai-title" && ev.AiTitle != "" {
+		snap.Title = ev.AiTitle
+	}
+	// /rename 写入 custom-title 事件,优先级高于 ai-title
+	if ev.Type == "custom-title" && ev.CustomTitle != "" {
+		snap.Title = ev.CustomTitle
+	}
+	if ev.Message != nil && (ev.Type == "user" || ev.Type == "assistant") {
+		snap.MsgCount++
+		if ev.Timestamp != "" {
+			snap.LastTs = ev.Timestamp
+		}
+		snap.LastRole = ev.Message.Role
+		snap.LastKind, snap.Preview = contentKindPreview(ev.Message.Content)
+		// 用户真·提问轮数:排除工具结果回传(role=user 但 content 是 tool_result)
+		if ev.Type == "user" && snap.LastKind != "tool_result" {
+			snap.Turns++
+		}
+		if ev.Type == "assistant" {
+			if ev.Message.Model != "" {
+				snap.Model = shortModel(ev.Message.Model)
+			}
+			if u := ev.Message.Usage; u != nil {
+				// 当前上下文占用 ≈ 最后一条 assistant 的 input + 两类 cache(随会话推进取最新)
+				snap.Tokens = u.InputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+			}
+		}
+	}
 }
 
 // contentKindPreview 解析 message.content(string 或 block 数组),返回 kind + 短预览。
