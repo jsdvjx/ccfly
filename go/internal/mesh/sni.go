@@ -22,7 +22,6 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,7 +109,8 @@ func (m *sniManager) apply(cfg *SNIConfig) {
 	log.Printf("ccfly: SNI arm up (account=%s exit=%s intercept=%v)", cfg.Account, net.JoinHostPort(cfg.Exit.Host, strconv.Itoa(cfg.Exit.Port)), cfg.Intercept)
 }
 
-// setupLocked 起 DNS + :443 + 改 resolv.conf(Linux)。任一步失败返回 err,交调用方 teardown 回滚。
+// setupLocked 起 DNS + :443 + 把系统解析指向本地(三平台各异,见 pointResolver)。任一步失败返回 err,
+// 交调用方 teardown 回滚。
 func (m *sniManager) setupLocked(cfg *SNIConfig) error {
 	// ① :443 双栈监听(需 root)。exit 经 overlay 拨,故先起监听、拨号在 accept 时按 activeNet 走(fail-open)。
 	for _, addr := range []string{"127.0.0.1:443", "[::1]:443"} {
@@ -121,7 +121,7 @@ func (m *sniManager) setupLocked(cfg *SNIConfig) error {
 		m.listeners = append(m.listeners, ln)
 		go m.serve443(ln, cfg.Exit)
 	}
-	// ② DNS :53(需 root)。
+	// ② DNS 127.0.0.1:53(需 root;resolv.conf/NRPT 的 nameserver 只接受 IP 不带端口 → 必须 :53)。
 	uc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53})
 	if err != nil {
 		return err
@@ -130,23 +130,20 @@ func (m *sniManager) setupLocked(cfg *SNIConfig) error {
 	intercept := normalizeDomains(cfg.Intercept)
 	upstream := firstUpstream(cfg.Upstream)
 	go m.serveDNS(uc, intercept, upstream)
-	// ③ resolv.conf 指向本地(Linux;非 Linux no-op,不改系统解析)。
-	if runtime.GOOS == "linux" {
-		if err := pointResolvConf(upstream); err != nil {
-			return err
-		}
-		m.resolvOn = true
-	} else {
-		log.Printf("ccfly: SNI DNS/:443 已起,但 %s 平台本版不自动改系统解析(需手动指向 127.0.0.1),AI 域拦截可能不生效", runtime.GOOS)
+	// ③ 把系统解析指向本地:Linux=resolv.conf 全局(+次级上游 fail-open);macOS=/etc/resolver/<域> scoped;
+	//    Windows=NRPT scoped。scoped 平台只把 intercept 域发本地、其余不动全局解析(更干净)。
+	if err := pointResolver(intercept, upstream); err != nil {
+		return err
 	}
+	m.resolvOn = true
 	return nil
 }
 
 // teardownLocked 恢复 resolv.conf、停 DNS、关 :443。幂等。
 func (m *sniManager) teardownLocked() {
 	if m.resolvOn {
-		if err := restoreResolvConf(); err != nil {
-			log.Printf("ccfly: SNI restore resolv.conf: %v", err)
+		if err := restoreResolver(); err != nil {
+			log.Printf("ccfly: SNI restore resolver: %v", err)
 		}
 		m.resolvOn = false
 	}
