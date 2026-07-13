@@ -227,7 +227,8 @@ type wgSession struct {
 	dev       *device.Device
 	bind      *clientWSBind
 	tun       io.Closer
-	listeners []io.Closer // overlay control proxy + any expose/forward bridges
+	tnet      *netstack.Net // this session's netstack (published to activeNet for the SNI :443 relay)
+	listeners []io.Closer   // overlay control proxy + any expose/forward bridges
 }
 
 // close brings the device down and releases the netstack TUN + listener.
@@ -239,6 +240,7 @@ func (s *wgSession) close() {
 	if s == nil {
 		return
 	}
+	activeNet.CompareAndSwap(s.tnet, nil) // 只清自己发布的那个 netstack(避免竞掉重连后的新会话)
 	for _, l := range s.listeners {
 		if l != nil {
 			_ = l.Close()
@@ -290,7 +292,8 @@ func bringUpWG(ctx context.Context, st *State, c *websocket.Conn) (*wgSession, e
 	}
 	dev := device.NewDevice(tunDev, bind, logger)
 
-	sess := &wgSession{dev: dev, bind: bind, tun: tunDev}
+	sess := &wgSession{dev: dev, bind: bind, tun: tunDev, tnet: tnet}
+	activeNet.Store(tnet) // 供 SNI :443 relay 经 overlay 拨到账号出口(见 sni.go)
 
 	if err := dev.IpcSet(uapi); err != nil {
 		sess.close()

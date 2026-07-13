@@ -63,6 +63,9 @@ type State struct {
 	CanUseClaude *bool `json:"can_use_claude,omitempty"`
 	CanUseProxy  *bool `json:"can_use_proxy,omitempty"`
 	CanUseMesh   *bool `json:"can_use_mesh,omitempty"`
+	// 云端下发的 SNI 出口段(可选):设备装本地 DNS 拦截器 + :443 透传,把 AI 域流量经 overlay 送到
+	// 账号出口 byway-sni(真证书,无 HTTP 代理/无 MITM)。nil/无段 = 不装/卸载(见 sni.go applySNI)。
+	SNI *SNIConfig `json:"sni,omitempty"`
 }
 
 // connectResp mirrors ccfly-cloud's POST /connect response.
@@ -460,6 +463,20 @@ func applyMeshProxy(st *State) {
 	applyProxyCA(st.ProxyCA)
 }
 
+// applyMeshSNI 据云端下发的 sni 段驱动 SNI arm 生命周期(有段→装,无段→卸;幂等)。
+// 与 applyMeshProxy 并列,由 runTunnel 在 refreshConfig 后调用。gate 同 MeshProxy 能力档。
+func applyMeshSNI(st *State) {
+	if !profile.Current().MeshProxy {
+		applySNI(nil) // 能力档不允许 → 确保卸载
+		return
+	}
+	if st == nil {
+		applySNI(nil)
+		return
+	}
+	applySNI(st.SNI)
+}
+
 // applyProxyCA 把云端下发的「出口 MITM CA bundle」落盘到 ~/.ccfly/proxy-ca.pem,并把
 // CCFLY_TMUX_PROXY_CA 指向它 —— proxyenv 据此给会话注入 NODE_EXTRA_CA_CERTS,使会话里的
 // claude(Node)信任 MITM 出口的证书,否则经出口的 HTTPS 会证书校验失败。
@@ -512,14 +529,15 @@ func refreshConfig(ctx context.Context, st *State) {
 	}
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var c struct {
-		CloudPublicKey string `json:"cloud_public_key"`
-		CloudOverlayIP string `json:"cloud_overlay_ip"`
-		ProxyPort      int    `json:"proxy_port"`
-		ProxyScheme    string `json:"proxy_scheme"`
-		ProxyCA        string `json:"proxy_ca"`
-		CanUseClaude   *bool  `json:"can_use_claude"`
-		CanUseProxy    *bool  `json:"can_use_proxy"`
-		CanUseMesh     *bool  `json:"can_use_mesh"`
+		CloudPublicKey string     `json:"cloud_public_key"`
+		CloudOverlayIP string     `json:"cloud_overlay_ip"`
+		ProxyPort      int        `json:"proxy_port"`
+		ProxyScheme    string     `json:"proxy_scheme"`
+		ProxyCA        string     `json:"proxy_ca"`
+		CanUseClaude   *bool      `json:"can_use_claude"`
+		CanUseProxy    *bool      `json:"can_use_proxy"`
+		CanUseMesh     *bool      `json:"can_use_mesh"`
+		SNI            *SNIConfig `json:"sni"`
 	}
 	if err := json.Unmarshal(data, &c); err != nil {
 		log.Printf("ccfly: device config refresh: bad JSON: %v", err)
@@ -551,6 +569,9 @@ func refreshConfig(ctx context.Context, st *State) {
 	if c.ProxyCA != st.ProxyCA {
 		st.ProxyCA, changed = c.ProxyCA, true
 	}
+	if !sameSNI(st.SNI, c.SNI) {
+		st.SNI, changed = c.SNI, true
+	}
 	if changed {
 		_ = saveState(st)
 		log.Printf("ccfly: refreshed device config (proxy_port=%d cloud_pub=%.8s…)", st.ProxyPort, st.CloudPublicKey)
@@ -558,11 +579,15 @@ func refreshConfig(ctx context.Context, st *State) {
 }
 
 func runTunnel(ctx context.Context, st *State) error {
-	refreshConfig(ctx, st) // 拉云端动态配置(proxy 策略 + cloud 公钥):保存身份重连的设备也能更新,无需重新配对
-	applyMeshProxy(st)     // 据(可能刚刷新的)proxy 策略自动起转发 + 设会话代理环境(见上)
-	go runSyncer(ctx, st)  // 后台把本地会话(摘要 + 全文)同步到云端归档;走公网控制面,与隧道状态无关
+	go runSyncer(ctx, st)   // 后台把本地会话(摘要 + 全文)同步到云端归档;走公网控制面,与隧道状态无关
+	defer applyMeshSNI(nil) // 进程退出时卸载 SNI arm(恢复 resolv.conf,不留指向死本地 DNS 的配置)
 	backoff := time.Second
 	for ctx.Err() == nil {
+		// 每次(重)连接前拉云端动态配置并重应用策略:登录后云端新绑定的 sni 账号 / 后加的 proxy 无需
+		// 重启进程,下次连接即生效(refreshConfig 优雅降级,与 dialOnce 顺序执行、无并发写 st)。
+		refreshConfig(ctx, st)
+		applyMeshProxy(st)
+		applyMeshSNI(st)
 		err := dialOnce(ctx, st)
 		if ctx.Err() != nil {
 			return nil
