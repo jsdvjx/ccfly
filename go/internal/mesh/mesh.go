@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -588,9 +589,16 @@ func runTunnel(ctx context.Context, st *State) error {
 		refreshConfig(ctx, st)
 		applyMeshProxy(st)
 		applyMeshSNI(st)
+		start := time.Now()
 		err := dialOnce(ctx, st)
 		if ctx.Err() != nil {
 			return nil
+		}
+		// 存活过 1 分钟的连接断开=稳定连接的闪断(晚高峰拥塞被服务端踢等),立即快速重连,
+		// 别拿爬满的退避罚它(退避从不重置曾让每次闪断都变成固定 30s 掉线体感)。
+		// 短命连接(dial 失败/秒断)照常翻倍退避,重连风暴保护不变。
+		if time.Since(start) > time.Minute {
+			backoff = time.Second
 		}
 		log.Printf("ccfly: mesh disconnected: %v — retrying in %s", err, backoff)
 		select {
@@ -618,6 +626,11 @@ func dialOnce(ctx context.Context, st *State) error {
 	if keepalive <= 0 {
 		keepalive = 25 * time.Second
 	}
+	// lastAct is stamped by the WG bind on every frame sent/received (see wg.go).
+	// The keepalive below trusts it over a pong: a device busy uploading starves
+	// its own ping behind the WS write lock, and self-closing such a live tunnel
+	// was the 2026-07 flap bug.
+	lastAct := new(atomic.Int64)
 	go func() {
 		t := time.NewTicker(keepalive)
 		defer t.Stop()
@@ -630,10 +643,16 @@ func dialOnce(ctx context.Context, st *State) error {
 				err := c.Ping(pctx)
 				cancel()
 				if err != nil {
-					// Dead/half-open conn (typically after the host sleeps): force
-					// the read side to error so dialOnce returns and the outer
-					// runTunnel loop reconnects promptly on wake. Without this,
-					// c.Read can block on the half-open TCP indefinitely.
+					// A missed pong does NOT prove death. If WG data moved
+					// recently the tunnel is alive — our own ping just starved
+					// behind the busy WS write lock; tearing it down here is the
+					// flap bug. Only close when there is ALSO no recent activity
+					// (genuinely dead / host slept), so the outer runTunnel loop
+					// reconnects. Send's own 10s write timeout still catches a
+					// truly stuck socket.
+					if ns := lastAct.Load(); ns != 0 && time.Since(time.Unix(0, ns)) < 45*time.Second {
+						continue
+					}
 					c.CloseNow()
 					return
 				}
@@ -645,7 +664,7 @@ func dialOnce(ctx context.Context, st *State) error {
 	// this WebSocket. If it fails to come up we fall back to merely draining
 	// inbound frames so the tunnel (and online status) is unaffected, then let
 	// the outer loop reconnect.
-	sess, err := bringUpWG(ctx, st, c)
+	sess, err := bringUpWG(ctx, st, c, lastAct)
 	if err != nil {
 		log.Printf("ccfly: wireguard datapath unavailable (tunnel still up): %v", err)
 		for {

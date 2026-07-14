@@ -26,6 +26,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -101,12 +102,24 @@ type clientWSBind struct {
 	conn   *websocket.Conn
 	recv   chan []byte
 	closed chan struct{} // recreated each Open(); closed by Close()
+	// lastAct is unix-nanos of the last WG frame sent or received. Shared with the
+	// keepalive goroutine (dialOnce): real traffic proves the tunnel is alive, so
+	// a starved keepalive pong must not trigger a self-teardown (the flap bug).
+	lastAct *atomic.Int64
 }
 
 var _ conn.Bind = (*clientWSBind)(nil)
 
-func newClientWSBind(c *websocket.Conn) *clientWSBind {
-	return &clientWSBind{conn: c, recv: make(chan []byte, 256)}
+func newClientWSBind(c *websocket.Conn, lastAct *atomic.Int64) *clientWSBind {
+	return &clientWSBind{conn: c, recv: make(chan []byte, 256), lastAct: lastAct}
+}
+
+// touch stamps last-activity (WG frame sent or received). Cheap; called on the
+// hot data path.
+func (b *clientWSBind) touch() {
+	if b.lastAct != nil {
+		b.lastAct.Store(time.Now().UnixNano())
+	}
 }
 
 // Open returns a single ReceiveFunc that drains the recv channel (fed by the
@@ -166,6 +179,7 @@ func (b *clientWSBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 			return err
 		}
 	}
+	b.touch() // outbound WG traffic = tunnel alive (keepalive trusts this over pong)
 	return nil
 }
 
@@ -187,7 +201,6 @@ func (b *clientWSBind) BatchSize() int       { return 1 }
 func (b *clientWSBind) pump(ctx context.Context) error {
 	b.mu.RLock()
 	c := b.conn
-	closedCh := b.closed
 	b.mu.RUnlock()
 	if c == nil {
 		return errors.New("mesh: bind has no websocket")
@@ -198,14 +211,17 @@ func (b *clientWSBind) pump(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		b.touch() // inbound WG traffic = tunnel alive
 		buf := make([]byte, len(data))
 		copy(buf, data)
+		// Non-blocking handoff — never park outside c.Read. Blocking on a full
+		// recv channel would stall this WS read loop so we stop auto-ponging the
+		// cloud's keepalive and get false-killed (the flap bug's receive-side
+		// face). Drop under backpressure; the inner TCP retransmits.
 		select {
 		case b.recv <- buf:
-		case <-closedCh:
-			return net.ErrClosed
-		case <-ctx.Done():
-			return ctx.Err()
+		default:
+			// recv full: drop and keep reading.
 		}
 	}
 }
@@ -264,7 +280,7 @@ func (s *wgSession) close() {
 // applies the UAPI config (hex keys), brings the device up, and starts the
 // overlay TCP proxy listener. On any error it tears down whatever was built and
 // returns it so the caller need not. The returned *wgSession must be close()d.
-func bringUpWG(ctx context.Context, st *State, c *websocket.Conn) (*wgSession, error) {
+func bringUpWG(ctx context.Context, st *State, c *websocket.Conn, lastAct *atomic.Int64) (*wgSession, error) {
 	overlayAddr, err := parseOverlayAddr(st.OverlayIP)
 	if err != nil {
 		return nil, err
@@ -274,7 +290,7 @@ func bringUpWG(ctx context.Context, st *State, c *websocket.Conn) (*wgSession, e
 		return nil, err
 	}
 
-	bind := newClientWSBind(c)
+	bind := newClientWSBind(c, lastAct)
 	logger := device.NewLogger(device.LogLevelError, "ccfly-wg: ")
 
 	// Kernel mode: real kernel TUN with the overlay IP on it, no bridges.
