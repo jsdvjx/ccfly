@@ -1,5 +1,65 @@
 # ccfly
 
+## 0.15.2
+
+### Patch Changes
+
+- fix(mesh): keepalive 以真实数据流动判活,消除重流量设备周期性掉线
+
+  设备侧数据面保活不再仅凭一个会被 WS 写锁饿死的 ping/pong 判活:
+
+  - `clientWSBind` 记录最近收发帧时刻;自身 keepalive ping 失败时若近期有 WG 活动则不自断
+  - `pump` 的入站投递改为非阻塞(背压时丢弃,由内层 TCP 重传),避免读循环停摆导致停发 pong
+
+  配套云端 meshd 侧同源修复(存活以入站数据为准 + 非阻塞入站),两端对称,彻底消除
+  "网络正常却 pong 超时 → 被误杀/自断"的 flap。
+
+## 0.15.1
+
+### Patch Changes
+
+- mesh: reset reconnect backoff to 1s after a stable (>1min) connection drops — long-lived devices no longer sit out a full 30s on every blip; short-lived failures still back off exponentially.
+
+## 0.15.0
+
+### Minor Changes
+
+- macOS install 一律要求 root 并强制 system 模式:SNI 出口的 root helper 必须以 root 绑 :443 / 写 /etc/hosts,
+  故 `ccfly install` / `ccfly uninstall` 在 macOS 上直接 hard-require sudo(非 root 在配对前即报错退出,不再
+  best-effort 静默跳过 helper 留下一个坏掉的 SNI)。agent 随之装成 system LaunchDaemon(UserName=真实用户,
+  以真实用户身份跑、共用 tmux/~/.claude),避开「用户 LaunchAgent 在 sudo 下 asuser/gui 域加载」的麻烦。
+  装 system 前会先 bootout + 删除同名残留的用户级 LaunchAgent,避免二者用同一设备身份双实例互顶 /mesh
+  (30s 规律 flap)。非 macOS 平台不受影响。
+
+## 0.14.0
+
+### Minor Changes
+
+- macOS SNI arm 双进程化:agent 非 root 无法绑特权 :443(且没有 CAP_NET_BIND_SERVICE 之类细粒度授权),
+  故新增独立 root LaunchDaemon `com.ccfly.sni-helper`(`ccfly sni-helper`,plist 不写 UserName = 真 root)
+  承接本地 :443 与 /etc/hosts,把每条 :443 连接 splice 回 agent 的非特权 relay 端口,overlay 拨号仍在 agent
+  内(WG netstack 是进程内对象不可跨进程)。DNS 侧改用 /etc/hosts 精确主机名钉 loopback(复用 Windows 的
+  hosts-pin 模型,LF 行尾),免掉本地 :53。`ccfly install` 随 agent 一并安装该 helper(需 sudo),`uninstall`
+  一并摘除。非 macOS 平台行为不变(单进程内联直绑)。
+
+## 0.13.0
+
+### Minor Changes
+
+- macOS 内置 tmux,用户免装:darwin 二进制 go:embed 一个可移植 tmux 3.5a(libevent/ncursesw 静态链接,仅依赖系统 libSystem;`default-terminal=screen-256color` 兼容全版本 macOS terminfo)。系统 tmux 永远优先(避免与用户已跑的 tmux server 版本冲突);只有找不到系统 tmux 时才释放到 `~/.ccfly/bin/tmux` 并纳入 PATH,`ccfly install` 同样自动兜底,不再因缺 tmux 报错要求 `brew install tmux`。Linux/Windows 行为不变(Windows 继续走平台包内置 psmux)。
+
+## 0.12.1
+
+### Patch Changes
+
+- 修复 Windows 升级时「复制 tmux.exe … Access is denied」:psmux 常驻(跑着用户会话)锁住 `~\.ccfly\bin\tmux.exe`,覆盖失败导致 tmux 永远升不了级。改为挪旧换新(运行中的 exe 可改名不可删):旧文件挪去 `.old`(已起进程继续用旧镜像,不打断会话),新文件落位;`.old` 残留由下次安装清扫,卸载器一并清理。ccfly.exe 本体同样走此路径兜底。
+
+## 0.12.0
+
+### Minor Changes
+
+- Windows 全面转管理员安装:安装器 `RequestExecutionLevel admin`(启动一次 UAC),`ccfly install`/`uninstall` 在 Windows 强制要求管理员 —— SNI hosts 模式要写 `%SystemRoot%\System32\drivers\etc\hosts`,且 HighestAvailable 计划任务只有从提权上下文注册运行时才真正拿到高 token。配对快捷方式自带「以管理员身份运行」标志;`ccfly uninstall` 现在兜底清理系统解析改动(Windows hosts 托管块 / macOS resolver 文件 / Linux resolv.conf),杜绝卸载后 Anthropic 域被钉死在 loopback 导致整机 Claude 不可用。
+
 ## 0.11.0
 
 ### Minor Changes
