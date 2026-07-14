@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jsdvjx/ccfly/go/internal/tmuxbin"
 )
 
 func ensureToolPath() {
@@ -45,12 +47,35 @@ func ensureToolPath() {
 		resolved := ensureUserBinDirs(loginPath)
 		os.Setenv("PATH", resolved)
 		log.Printf("ccfly: PATH resolved from login shell %s (%d entries)", flags, strings.Count(resolved, ":")+1)
+		ensureBundledTmux()
 		return
 	}
 	// 登录 shell 探测全数失败(常见于 launchd 无 tty):兜底也必须带上用户级 bin 目录,
 	// 否则 launchd 下永远找不到 ~/.local/bin 里的 claude。
 	os.Setenv("PATH", ensureUserBinDirs(fallbackExtras+":"+current))
 	log.Printf("ccfly: PATH fallback (login shell probe failed), prepended %s + user bin dirs", fallbackExtras)
+	ensureBundledTmux()
+}
+
+// ensureBundledTmux:PATH 定妥后仍找不到 tmux(用户没装、也没有 homebrew)→ 把内嵌
+// tmux(仅 darwin 构建携带,见 internal/tmuxbin)释放到 ~/.ccfly/bin 并前置进 PATH,
+// 后续所有 exec.Command("tmux") / LookPath 直接命中。系统 tmux 永远优先:已装用户
+// 可能有自己的配置和在跑的 server,tmux 客户端-服务端跨版本直接 protocol mismatch。
+// 非 darwin 构建 Bundled()=false,此函数是空操作。
+func ensureBundledTmux() {
+	if !tmuxbin.Bundled() {
+		return
+	}
+	if _, err := exec.LookPath("tmux"); err == nil {
+		return
+	}
+	p, err := tmuxbin.Ensure()
+	if err != nil {
+		log.Printf("ccfly: 系统无 tmux 且内置 tmux 释放失败: %v", err)
+		return
+	}
+	os.Setenv("PATH", filepath.Dir(p)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	log.Printf("ccfly: 系统未装 tmux,使用内置 tmux: %s", p)
 }
 
 // ensureUserBinDirs 保证 PATH 里含 claude 原生安装器使用的用户级目录(~/.local/bin、~/bin);
