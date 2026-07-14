@@ -114,6 +114,7 @@ func Handler() http.Handler {
 	mux.HandleFunc("GET /sessions", handleSessions)        // 落地页会话列表(SessionMeta[] 形状)
 	mux.HandleFunc("GET /sse/jsonl", handleSseJsonl)       // 原始 jsonl 增量流(SSE,fsnotify;ccfly-ttyd-ui 状态源)
 	mux.HandleFunc("GET /jsonl/before", handleJsonlBefore) // 向上翻页:before 字节前的一窗更老原始行(无状态)
+	mux.HandleFunc("GET /sni-status", handleSNIStatus)     // SNI arm 自检:armed/exit/:53/:443/resolver + 主动探测(?probe=1 同步实时)
 	// 内嵌 web 表世界 SPA:必须最后注册「GET /」兜底。Go 1.22 ServeMux「最具体优先」,
 	// 上面各显式 API 路由自动赢过它;剩下「非 API、无文件」路径回退 index.html(history 路由)。
 	mux.HandleFunc("GET /", staticHandler())

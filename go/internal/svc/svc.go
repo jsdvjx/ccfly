@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/jsdvjx/ccfly/go/internal/profile"
+	"github.com/jsdvjx/ccfly/go/internal/tmuxbin"
 )
 
 // Options configures Install / Uninstall.
@@ -37,6 +38,11 @@ type Options struct {
 	// ccfly agent profile is used (preserving existing behavior).
 	Profile *Profile
 }
+
+// IsAdmin 报告当前进程是否已持有管理员/超级用户权限(Windows=提权 token 属于
+// Administrators 组,UAC 过滤 token 算否;Unix=euid 0)。Windows 的 install/uninstall
+// 用它做前置闸门,cmd/ccfly 在交互式配对前也用它提前拦截。
+func IsAdmin() bool { return isRoot() }
 
 // Profile describes one installable service: its identity (names) and the exact
 // command to run. Args is the full argv AFTER the binary path.
@@ -101,6 +107,39 @@ func Uninstall(o Options) error {
 	default:
 		return fmt.Errorf("ccfly uninstall: unsupported OS %q", runtime.GOOS)
 	}
+}
+
+// InstallSNIHelper 安装 macOS SNI 的 root 特权 helper LaunchDaemon(承接 :443 + /etc/hosts,让非 root
+// 的 agent 也能 arm SNI 出口)。仅 darwin 有意义且需 root;其余平台或非 root → (false,nil) no-op。
+// installed 报告是否真的装了(供调用方决定提示文案)。
+func InstallSNIHelper(dryRun bool) (installed bool, err error) {
+	if runtime.GOOS != "darwin" {
+		return false, nil
+	}
+	return installSNIHelperDarwin(dryRun)
+}
+
+// UninstallSNIHelper 摘掉 macOS SNI root helper。非 darwin → no-op。
+func UninstallSNIHelper(dryRun bool) error {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	return uninstallSNIHelperDarwin(dryRun)
+}
+
+// bootoutUserAgent 摘掉可能残留的同名用户级 LaunchAgent(~/Library/LaunchAgents/<label>.plist),
+// 装 macOS system 服务前调用,避免二者用同一设备身份双实例互顶 /mesh(30s flap)。best-effort:先在该
+// 用户 GUI 域 bootout(以 root 跑须指定 gui/<uid>,否则加载在 system 域、摘不到用户 agent),再删 plist。
+// 仅 darwin install 路径调用;函数本身只用跨平台原语,故放共享区。
+func bootoutUserAgent(home, label string, uid int) {
+	userPlist := filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+	if _, err := os.Stat(userPlist); err != nil {
+		return // 无用户级残留
+	}
+	_ = run("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", uid, label)) // 新式;摘不到就忽略
+	_ = run("launchctl", "unload", userPlist)                             // 老式兜底
+	_ = os.Remove(userPlist)
+	fmt.Printf("✓ 已移除残留的用户级 LaunchAgent %s(避免与 system 服务双实例互顶)\n", label)
 }
 
 // ── shared helpers ──
@@ -168,7 +207,11 @@ func validate(o Options) error {
 // minimal PATH still resolves it). When needTmux and tmux is absent it errors,
 // so `ccfly install` fails fast rather than leaving a service that dies; a
 // mesh-only service (needTmux=false) does not require tmux.
-func servicePATH(needTmux bool) (pathEnv, tmuxPath string, err error) {
+//
+// bundleDir 非空且本构建内嵌了 tmux(darwin,见 internal/tmuxbin)时,系统找不到
+// tmux 不再报错,改用 bundleDir/tmux 兜底并返回 bundled=true —— 实际释放由调用方
+// 在非 DryRun 时做(servicePATH 自身保持只读)。
+func servicePATH(needTmux bool, bundleDir string) (pathEnv, tmuxPath string, bundled bool, err error) {
 	std := []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"}
 	tmuxPath, _ = exec.LookPath("tmux")
 	if tmuxPath == "" { // PATH may be minimal (e.g. under sudo) — scan common dirs
@@ -180,11 +223,14 @@ func servicePATH(needTmux bool) (pathEnv, tmuxPath string, err error) {
 			}
 		}
 	}
+	if tmuxPath == "" && needTmux && bundleDir != "" && tmuxbin.Bundled() {
+		tmuxPath, bundled = filepath.Join(bundleDir, "tmux"), true
+	}
 	if tmuxPath == "" {
 		if needTmux {
-			return "", "", fmt.Errorf("tmux 未找到 —— 先安装(如 `brew install tmux`);ccfly 的终端/会话控制依赖 tmux")
+			return "", "", false, fmt.Errorf("tmux 未找到 —— 先安装(macOS: `brew install tmux`,Linux: `apt/yum install tmux`);ccfly 的终端/会话控制依赖 tmux")
 		}
-		return strings.Join(std, ":"), "", nil
+		return strings.Join(std, ":"), "", false, nil
 	}
 	dirs := []string{filepath.Dir(tmuxPath)}
 	seen := map[string]bool{dirs[0]: true}
@@ -194,7 +240,7 @@ func servicePATH(needTmux bool) (pathEnv, tmuxPath string, err error) {
 			dirs = append(dirs, d)
 		}
 	}
-	return strings.Join(dirs, ":"), tmuxPath, nil
+	return strings.Join(dirs, ":"), tmuxPath, bundled, nil
 }
 
 func xmlEsc(s string) string {
@@ -212,11 +258,17 @@ func installDarwin(o Options) error {
 		return err
 	}
 	p := o.resolve(home)
-	svcPATH, tmuxPath, err := servicePATH(p.NeedsTmux)
+	// 内置 tmux 的落点固定在 ~/.ccfly/bin(ccfly 自有工具目录;与运行时兜底
+	// ensureBundledTmux 同一位置,system/user 两档一致,chownTree 顺带覆盖属主)。
+	bundleDir := filepath.Join(home, ".ccfly", "bin")
+	svcPATH, tmuxPath, bundledTmux, err := servicePATH(p.NeedsTmux, bundleDir)
 	if err != nil {
 		return fmt.Errorf("ccfly install: %w", err)
 	}
-	if tmuxPath != "" {
+	switch {
+	case bundledTmux:
+		fmt.Printf("✓ tmux: %s(系统未装 tmux,使用 ccfly 内置)\n", tmuxPath)
+	case tmuxPath != "":
 		fmt.Printf("✓ tmux: %s\n", tmuxPath)
 	}
 	self, err := selfPath()
@@ -262,9 +314,19 @@ func installDarwin(o Options) error {
 	}
 
 	killStaleProcesses() // 清掉游离旧实例:多实例互顶 mesh 连接会 30s 规律断连
+	if o.System {
+		// 装 system 服务前,清掉可能残留的同名**用户级 LaunchAgent**——否则它被 launchd
+		// KeepAlive 重启,与新 system 服务用同一设备身份双实例互顶 /mesh(30s flap)。best-effort。
+		bootoutUserAgent(home, p.DarwinLabel, uid)
+	}
 
 	if err := copyExe(self, binPath, 0o755); err != nil {
 		return fmt.Errorf("install binary: %w", err)
+	}
+	if bundledTmux {
+		if _, err := tmuxbin.EnsureAt(bundleDir); err != nil {
+			return fmt.Errorf("install bundled tmux: %w", err)
+		}
 	}
 	// log/state dir must be writable by the run user
 	ccflyDir := filepath.Join(home, ".ccfly")
@@ -328,7 +390,8 @@ func installLinux(o Options) error {
 		return err
 	}
 	p := o.resolve(home)
-	svcPATH, tmuxPath, err := servicePATH(p.NeedsTmux)
+	// Linux 构建不内嵌 tmux(bundleDir 传空即保持原「fail fast」行为;发行版装 tmux 是常态)。
+	svcPATH, tmuxPath, _, err := servicePATH(p.NeedsTmux, "")
 	if err != nil {
 		return fmt.Errorf("ccfly install: %w", err)
 	}
@@ -458,4 +521,3 @@ func userJournalFlag(system bool) string {
 	}
 	return " --user"
 }
-

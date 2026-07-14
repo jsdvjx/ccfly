@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"time"
@@ -14,6 +15,12 @@ const windowsTaskName = "ccfly"
 func installWindows(o Options) error {
 	if err := validate(o); err != nil {
 		return err
+	}
+	// hosts 模式的硬要求:SNI arm 要写 %SystemRoot%\System32\drivers\etc\hosts,且
+	// HighestAvailable 任务只有从提权上下文注册,运行时才真正拿到高 token。所以
+	// Windows 上 install 一律要求管理员(安装器/快捷方式已自动提权;dry-run 放行)。
+	if !o.DryRun && !isRoot() {
+		return fmt.Errorf("Windows 上 install 需要管理员权限(SNI 需写 hosts、注册提权计划任务):请用管理员终端重跑,或直接用安装器 ccfly-setup(自动提权)")
 	}
 	name, home, _, _, err := runAs(o.System)
 	if err != nil {
@@ -53,7 +60,14 @@ func installWindows(o Options) error {
 	if o.System {
 		userID = "SYSTEM"
 	} else {
+		// UserId 一律用 SID,不用用户名:微软账号/AzureAD 登录的机器,调度器对用户名形式的
+		// UserId **静默跳过**(任务能建、Next Run 排队,但 Last Run 永远 1999、进程从不启动;
+		// DESKTOP-BN6KIGG 与 2026-07-13 两台新装 0.11.0 实测)。Go 的 user.Current().Uid 在
+		// Windows 上就是 SID 字符串,本地账号同样解析,无兼容代价。
 		userID = name
+		if u, err := user.Current(); err == nil && strings.HasPrefix(u.Uid, "S-") {
+			userID = u.Uid
+		}
 	}
 
 	// 自愈触发器:除 logon/boot 外,再加「每 5 分钟重复」的日历触发 —— 服务静默死亡
@@ -121,15 +135,18 @@ func installWindows(o Options) error {
 	// 清场:杀掉其它 ccfly 进程 —— 旧实例会与新服务互顶 mesh 连接(30s 断连),
 	// 且 Windows 不允许覆盖运行中的 exe(不杀则 copyExe EPERM)。
 	killStaleProcesses()
+	sweepOldExes(filepath.Dir(binPath))
 
-	if err := copyExe(self, binPath, 0o755); err != nil {
+	if err := replaceExe(self, binPath, 0o755); err != nil {
 		return fmt.Errorf("install binary: %w", err)
 	}
-	// Copy bundled tmux.exe (psmux) if it sits next to the source binary
+	// Copy bundled tmux.exe (psmux) if it sits next to the source binary.
+	// psmux 常驻(里面跑着用户会话)且从本 bin 目录起(ensureToolPath 把它排 PATH 最前),
+	// 文件被锁 → 必须走 replaceExe 的挪旧换新,直接 copyExe 覆盖会 Access is denied。
 	srcTmux := filepath.Join(filepath.Dir(self), "tmux.exe")
 	dstTmux := filepath.Join(filepath.Dir(binPath), "tmux.exe")
 	if _, e := os.Stat(srcTmux); e == nil {
-		if err := copyExe(srcTmux, dstTmux, 0o755); err != nil {
+		if err := replaceExe(srcTmux, dstTmux, 0o755); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠ 复制 tmux.exe 失败: %v\n", err)
 		} else {
 			fmt.Printf("✓ tmux.exe (psmux) -> %s\n", dstTmux)
@@ -171,8 +188,11 @@ func installWindows(o Options) error {
 }
 
 func uninstallWindows(o Options) error {
-	if o.System && !isRoot() {
-		return fmt.Errorf("--system needs administrator: re-run as admin")
+	// 卸载同样要求管理员:除了删任务,还要清 hosts 托管块(cmd/ccfly 在 svc.Uninstall
+	// 之后调 mesh.CleanupResolver)—— 服务是被硬杀的不会走 teardown,残留的块会把
+	// Anthropic 域钉死在 loopback,整机 Claude 全断。
+	if !o.DryRun && !isRoot() {
+		return fmt.Errorf("Windows 上 uninstall 需要管理员权限(需清 hosts 托管块):请用管理员终端重跑,或走「卸载 ccfly」快捷方式 / 系统卸载入口(自动提权)")
 	}
 	_, home, _, _, err := runAs(o.System)
 	if err != nil {
@@ -205,4 +225,35 @@ func logonType(system bool) string {
 		return "ServiceAccount"
 	}
 	return "InteractiveToken"
+}
+
+// replaceExe 把 src 复制为 dst,容忍 dst 正被运行占用:Windows 不能删除/覆盖运行中的
+// exe(rename 目标报 Access is denied),但**可以重命名它** —— 先把旧文件挪去 .old
+// (已起的进程继续用旧镜像跑到退出,如 psmux 里用户的 Claude 会话,不打断),再落新
+// 文件。.old 残留由下次安装的 sweepOldExes 清扫。
+func replaceExe(src, dst string, mode os.FileMode) error {
+	if _, err := os.Stat(dst); err == nil {
+		aside := dst + ".old"
+		_ = os.Remove(aside) // 上次遗留:没进程占着就删;删不掉(仍在跑)→ 下面换时间戳名
+		if err := os.Rename(dst, aside); err != nil {
+			aside = fmt.Sprintf("%s.old-%d", dst, time.Now().Unix())
+			if err := os.Rename(dst, aside); err != nil {
+				return err
+			}
+		}
+	}
+	return copyExe(src, dst, mode)
+}
+
+// sweepOldExes 清扫 replaceExe 留下的 *.old*(镜像仍被占用的删不掉,留给再下次)。
+func sweepOldExes(dir string) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		if !e.IsDir() && strings.Contains(e.Name(), ".old") {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
 }

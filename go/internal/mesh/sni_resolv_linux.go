@@ -14,6 +14,10 @@ const (
 	resolvBackup = "/etc/resolv.conf.ccfly-sni-bak"
 )
 
+// resolverNeedsLocalDNS 报告本平台是否需要本地 :53 DNS。Linux 把 resolv.conf 指向 127.0.0.1,
+// 故需要本地 DNS 接管解析。
+func resolverNeedsLocalDNS() bool { return true }
+
 // pointResolver 把 resolv.conf 改成「127.0.0.1 优先 + 真上游次级(fail-open)」。首次调用备份原文件。
 func pointResolver(intercept []string, upstream string) error {
 	_ = intercept // Linux 全局拦截,不按域 scoped;本地 DNS 内部按 intercept 过滤

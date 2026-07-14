@@ -11,10 +11,11 @@ package mesh
 //      —— 比外部 SmartDNS 轻(无需下载/装二进制),ccfly 本就是 Go 进程。
 //   ② 本地 :443 双栈 TCP(127.0.0.1 + [::1]):把连接经 overlay netstack 透传到 exit(账号 byway-sni),
 //      byway-sni peek SNI 后按设备源 IP 的池规则从账号 IP 出网。
-//   ③ Linux:改 /etc/resolv.conf 指向 127.0.0.1(备份原文件;把真上游列为次级 nameserver 做 fail-open)。
-//      macOS/Windows:本版 no-op(不改系统解析,记 log;等后续平台安装器)。
+//   ③ 系统解析指向(pointResolver,三平台各异):Linux=/etc/resolv.conf 指向 127.0.0.1(备份原文件,
+//      真上游列为次级 nameserver 做 fail-open);macOS=/etc/resolver/<域> scoped resolver;
+//      Windows=hosts 托管块把精确主机名钉到 loopback(需管理员 token,见 sni_hosts.go)。
 //
-// 失败安全:任一组件起不来(非 root 无法 bind :53/:443、或非 Linux)→ 不改系统解析、不 brick,只 log。
+// 失败安全:任一组件起不来(非 root/非管理员无法 bind :53/:443 或写 hosts)→ 不改系统解析、不 brick,只 log。
 // 卸载:恢复 resolv.conf、停 DNS、关 :443。幂等(重复无段 = 保持卸载态)。
 
 import (
@@ -64,11 +65,14 @@ func sameSNI(a, b *SNIConfig) bool {
 // ── SNI 管理器(单例,config 驱动的生命周期)──
 
 type sniManager struct {
-	mu        sync.Mutex
-	cur       *SNIConfig     // 当前生效配置(nil=未装)
-	dnsConn   *net.UDPConn   // :53 UDP
-	listeners []net.Listener // :443 v4 + v6
-	resolvOn  bool           // 是否已改过 resolv.conf(卸载时才恢复)
+	mu         sync.Mutex
+	cur        *SNIConfig     // 当前生效配置(nil=未装)
+	dnsConn    *net.UDPConn   // :53 UDP
+	listeners  []net.Listener // :443 v4 + v6(darwin helper 路径下=非特权 relay 监听)
+	resolvOn   bool           // 是否已改过 resolv.conf(卸载时才恢复)
+	helperConn net.Conn       // darwin only:到 root sni-helper 的控制连接(关它即撤 arm 租约→恢复 hosts/关 :443)
+	since      time.Time      // arm 成功起来的时刻(卸载清零);供 /sni-status 与上报
+	lastErr    string         // 最近一次 setup 失败原因(成功清空);解释非 root/非 Linux 静默 no-op
 }
 
 var sniMgr = &sniManager{}
@@ -102,16 +106,24 @@ func (m *sniManager) apply(cfg *SNIConfig) {
 	}
 	if err := m.setupLocked(cfg); err != nil {
 		log.Printf("ccfly: SNI setup failed (fail-open, 不影响正常上网): %v", err)
-		m.teardownLocked() // 回滚已起的部分,恢复 resolv.conf
+		m.lastErr = err.Error() // 供 /sni-status 暴露(如非 root 无法 bind :443/:53)
+		m.teardownLocked()      // 回滚已起的部分,恢复 resolv.conf
 		return
 	}
 	m.cur = cfg
+	m.since = time.Now()
+	m.lastErr = ""
 	log.Printf("ccfly: SNI arm up (account=%s exit=%s intercept=%v)", cfg.Account, net.JoinHostPort(cfg.Exit.Host, strconv.Itoa(cfg.Exit.Port)), cfg.Intercept)
 }
 
 // setupLocked 起 DNS + :443 + 把系统解析指向本地(三平台各异,见 pointResolver)。任一步失败返回 err,
 // 交调用方 teardown 回滚。
 func (m *sniManager) setupLocked(cfg *SNIConfig) error {
+	// macOS:agent 非 root 绑不了 :443、写不了 /etc/hosts → 拆双进程,特权部分交 root sni-helper 承接
+	// (overlay 拨号仍在本进程,见 snihelper_darwin.go)。其余平台走下面的单进程内联直绑。
+	if sniUsesHelper() {
+		return m.setupViaHelper(cfg)
+	}
 	// ① :443 双栈监听(需 root)。exit 经 overlay 拨,故先起监听、拨号在 accept 时按 activeNet 走(fail-open)。
 	for _, addr := range []string{"127.0.0.1:443", "[::1]:443"} {
 		ln, err := net.Listen("tcp", addr)
@@ -121,17 +133,21 @@ func (m *sniManager) setupLocked(cfg *SNIConfig) error {
 		m.listeners = append(m.listeners, ln)
 		go m.serve443(ln, cfg.Exit)
 	}
-	// ② DNS 127.0.0.1:53(需 root;resolv.conf/NRPT 的 nameserver 只接受 IP 不带端口 → 必须 :53)。
-	uc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53})
-	if err != nil {
-		return err
-	}
-	m.dnsConn = uc
 	intercept := normalizeDomains(cfg.Intercept)
 	upstream := firstUpstream(cfg.Upstream)
-	go m.serveDNS(uc, intercept, upstream)
+	// ② DNS 127.0.0.1:53(需 root;resolv.conf/NRPT 的 nameserver 只接受 IP 不带端口 → 必须 :53)。
+	//    仅在需要「把系统解析导到本地 nameserver」的平台起(Linux resolv.conf / macOS /etc/resolver)。
+	//    Windows 走 hosts 直钉(见 sni_resolv_windows.go),不需要 :53 —— 也因此躲开 Clash 等占 :53 的代理。
+	if resolverNeedsLocalDNS() {
+		uc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53})
+		if err != nil {
+			return err
+		}
+		m.dnsConn = uc
+		go m.serveDNS(uc, intercept, upstream)
+	}
 	// ③ 把系统解析指向本地:Linux=resolv.conf 全局(+次级上游 fail-open);macOS=/etc/resolver/<域> scoped;
-	//    Windows=NRPT scoped。scoped 平台只把 intercept 域发本地、其余不动全局解析(更干净)。
+	//    Windows=hosts 精确主机名钉 loopback(无通配、逐主机名、局部块替换)。
 	if err := pointResolver(intercept, upstream); err != nil {
 		return err
 	}
@@ -139,8 +155,19 @@ func (m *sniManager) setupLocked(cfg *SNIConfig) error {
 	return nil
 }
 
+// CleanupResolver 兜底清掉本机的系统解析改动(Windows hosts 托管块 / macOS /etc/resolver
+// 标记文件 / Linux resolv.conf 备份恢复),给 `ccfly uninstall` 收尾用:常驻服务是被硬杀的
+// (schtasks /End、launchctl),不会走 teardown —— Windows 上残留的 hosts 块会把 Anthropic
+// 域钉死在 loopback(无人监听 :443),整机 Claude 全断。幂等,未写过时是 no-op。
+func CleanupResolver() error { return restoreResolver() }
+
 // teardownLocked 恢复 resolv.conf、停 DNS、关 :443。幂等。
 func (m *sniManager) teardownLocked() {
+	// darwin helper 路径:关控制连接即通知 root sni-helper 撤租约(恢复 /etc/hosts + 关它持的 :443)。
+	if m.helperConn != nil {
+		_ = m.helperConn.Close()
+		m.helperConn = nil
+	}
 	if m.resolvOn {
 		if err := restoreResolver(); err != nil {
 			log.Printf("ccfly: SNI restore resolver: %v", err)
@@ -159,6 +186,7 @@ func (m *sniManager) teardownLocked() {
 		log.Printf("ccfly: SNI arm down")
 	}
 	m.cur = nil
+	m.since = time.Time{}
 }
 
 // serve443 accept 本地 :443 连接,经 overlay netstack 透传到 exit(账号 byway-sni)。

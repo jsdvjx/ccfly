@@ -101,7 +101,9 @@ func pushSummaries(ctx context.Context, st *State, digests []control.SessionDige
 			GitBranch: d.GitBranch, Preview: d.Preview, AttnKind: attn[d.SessionID],
 		})
 	}
-	payload, err := json.Marshal(map[string]any{"sessions": arr})
+	// 带上 SNI arm 运行状态(同包直读 sniMgr;探测缓存 async 刷新,不阻塞本次推送)。
+	// 未装 SNI 的设备也上报(armed=false),让云端能区分「上报了未生效」与「从未上报」。
+	payload, err := json.Marshal(map[string]any{"sessions": arr, "sni": sniMgr.status(false)})
 	if err != nil {
 		return nil, false
 	}

@@ -17,6 +17,10 @@ const resolverMarker = "# ccfly-sni" // 标记我们创建的文件,restoreResol
 // resolverDir 是 macOS scoped resolver 目录;var 便于测试覆盖到临时目录(生产恒 /etc/resolver)。
 var resolverDir = "/etc/resolver"
 
+// resolverNeedsLocalDNS 报告本平台是否需要本地 :53 DNS。macOS scoped resolver 把 intercept 域的查询
+// 导到 127.0.0.1:53,故需要本地 DNS。
+func resolverNeedsLocalDNS() bool { return true }
+
 // pointResolver 为每个 intercept 域写 /etc/resolver/<域>,把该域(含子域)的 DNS 路由到本地。
 // upstream 在 macOS 不用(scoped:只有 intercept 域进本地 DNS,其余走系统默认,无需本地转发上游)。
 func pointResolver(intercept []string, upstream string) error {
@@ -36,8 +40,15 @@ func pointResolver(intercept []string, upstream string) error {
 	return nil
 }
 
-// restoreResolver 删除所有 ccfly 标记的 /etc/resolver 文件(标记比记路径更稳,能清理重启遗留)。幂等。
+// restoreResolver 清掉 macOS 的两类 SNI 系统解析改动,给 `ccfly uninstall` 的 CleanupResolver 兜底
+// (服务被硬杀不走 teardown;且现役 arm 走 /etc/hosts,legacy arm 曾用 /etc/resolver):
+//
+//	① /etc/hosts 的 ccfly 托管块(现役双进程 helper 路径写的);
+//	② 所有 ccfly 标记的 /etc/resolver 文件(旧 scoped-resolver 路径的遗留,标记法能清重启孤儿)。
+//
+// 两者都需 root——uninstall 是 `sudo ccfly uninstall`,本函数即以 root 执行。幂等。
 func restoreResolver() error {
+	_ = restoreUnixHosts(unixHostsPath) // ① 现役:剥 /etc/hosts 托管块(见 snihelper_darwin.go)
 	entries, err := os.ReadDir(resolverDir)
 	if err != nil {
 		return nil // 目录不存在 = 没建过

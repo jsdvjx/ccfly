@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -51,6 +52,15 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "_termpty" {
 		if err := runTermBridge(os.Args[2:]); err != nil {
 			os.Exit(1)
+		}
+		return
+	}
+	// sni-helper:macOS SNI arm 的 root 特权子服务(独立 LaunchDaemon,承接 :443 与 /etc/hosts;
+	// agent 非 root 干不了这两件事,见 mesh/snihelper_darwin.go)。不走 ensureToolPath(纯网络守护,
+	// 无 tmux/claude 依赖,免 5s 登录壳 PATH 探测)。
+	if len(os.Args) > 1 && os.Args[1] == "sni-helper" {
+		if err := mesh.RunSNIHelper(); err != nil {
+			log.Fatalf("sni-helper: %v", err)
 		}
 		return
 	}
@@ -230,6 +240,7 @@ func runConnect(ctx context.Context, args []string) error {
 			return fmt.Errorf("start control service: %w", err)
 		}
 		port := ln.Addr().(*net.TCPAddr).Port
+		control.SNIStatusFn = mesh.SNIStatusJSON // GET /sni-status 读 SNI arm 状态(control 不能 import mesh,故注入)
 		srv := &http.Server{Handler: control.Handler()}
 		go func() { _ = srv.Serve(ln) }()
 		go func() { <-ctx.Done(); _ = srv.Close() }()
@@ -282,6 +293,24 @@ func runInstall(ctx context.Context, args []string) error {
 		target = line
 	}
 
+	// Windows 一律要求管理员(SNI hosts 模式 + HighestAvailable 任务注册,见 svc/mesh)。
+	// 检查必须在交互式配对**之前**:不能让用户在浏览器里点完「批准」才被告知要重跑。
+	// svc.Install 里还有一道兜底闸门。
+	if runtime.GOOS == "windows" && !*dry && !svc.IsAdmin() {
+		return errors.New("Windows 上 install 需要管理员权限(SNI 需写 hosts、注册提权计划任务):请用管理员终端重跑,或直接用安装器 ccfly-setup(自动提权)")
+	}
+
+	// macOS 一律要求 root:SNI 出口的 root helper 必须以 root 绑 :443 / 写 /etc/hosts(agent 非 root 干不了,
+	// 且 macOS 无 CAP_NET_BIND_SERVICE / 无法降特权端口阈值)。故 macOS install 直接 hard-require sudo,
+	// 且 agent 一并装成 **system LaunchDaemon(UserName=真实用户)**——以真实用户身份跑(共用 tmux/~/.claude),
+	// 但由 root 装、走 system 域,避开「用户 LaunchAgent 在 sudo 下 asuser 加载」那套麻烦。检查须在配对前。
+	if runtime.GOOS == "darwin" {
+		if !*dry && !svc.IsAdmin() {
+			return errors.New("macOS 上 ccfly install 需要 root(SNI 出口的 root helper 要绑 :443/写 /etc/hosts):请用 sudo 重跑,例如: sudo ccfly install " + target)
+		}
+		*system = true // agent 装成 system-daemon-as-user;root helper 另装为纯 root 守护
+	}
+
 	// 纯 host(无码)→ 安装前先交互式配对一次(--dry-run 跳过,只展示要写什么)。
 	// 已配对则 Pair 幂等直接返回。带 /<code> 的 code 目标保持原样,不做交互。
 	// 判定与 mesh 的运行期分发口径一致:剥掉可选的 "scheme://" 前缀后再看是否含 "/"。
@@ -298,7 +327,23 @@ func runInstall(ctx context.Context, args []string) error {
 	if strings.TrimSpace(*expose) != "" {
 		extra = append(extra, "--overlay-expose", *expose)
 	}
-	return svc.Install(svc.Options{Target: target, System: *system, ClaudeDir: *claudeDir, DryRun: *dry, ExtraArgs: extra})
+	if err := svc.Install(svc.Options{Target: target, System: *system, ClaudeDir: *claudeDir, DryRun: *dry, ExtraArgs: extra}); err != nil {
+		return err
+	}
+	// macOS:随 agent 一并装 SNI root helper(承接 :443/写 /etc/hosts)。此处 root 已由上面的闸门保证
+	// (非 dry-run 必 sudo),故正常都会真正装上。失败只警告不阻断(agent 已装好,SNI 出口不生效而已)。
+	if runtime.GOOS == "darwin" {
+		installed, herr := svc.InstallSNIHelper(*dry)
+		switch {
+		case herr != nil:
+			fmt.Fprintf(os.Stderr, "⚠ SNI root helper 安装失败(SNI 出口在本机将无法生效,其余功能不受影响): %v\n", herr)
+		case *dry:
+			// dry-run:上面已打印 helper plist 预览,不再声称「已安装」。
+		case installed:
+			fmt.Println("✓ 已安装 SNI root helper(com.ccfly.sni-helper);SNI 出口可在本机生效")
+		}
+	}
+	return nil
 }
 
 // runUninstall removes the persistent service.
@@ -309,7 +354,30 @@ func runUninstall(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return svc.Uninstall(svc.Options{System: *system, DryRun: *dry})
+	// macOS:install 装的是 system LaunchDaemon(agent)+ root helper,两者都要 root 才能摘。
+	// 故 uninstall 同样 hard-require sudo 且按 system 处理(与 install 对称)。
+	if runtime.GOOS == "darwin" {
+		if !*dry && !svc.IsAdmin() {
+			return errors.New("macOS 上 ccfly uninstall 需要 root(要摘 system 服务 + root helper 守护):请用 sudo 重跑,例如: sudo ccfly uninstall")
+		}
+		*system = true
+	}
+	if err := svc.Uninstall(svc.Options{System: *system, DryRun: *dry}); err != nil {
+		return err
+	}
+	// macOS:一并摘掉 SNI root helper 守护(非 darwin/非 root → no-op)。
+	if err := svc.UninstallSNIHelper(*dry); err != nil {
+		fmt.Fprintf(os.Stderr, "⚠ 移除 SNI root helper 失败(可手动 rm /Library/LaunchDaemons/com.ccfly.sni-helper.plist): %v\n", err)
+	}
+	// 服务是被硬杀的,不会走 SNI teardown —— 这里兜底清系统解析改动(Windows hosts
+	// 托管块 / macOS resolver 文件 / Linux resolv.conf)。Windows 残留块会把 Anthropic
+	// 域钉死在 loopback,整机 Claude 全断。幂等;失败只警告不阻断卸载。
+	if !*dry {
+		if err := mesh.CleanupResolver(); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ 清理系统解析改动失败(hosts/resolver 可能残留,请手动检查): %v\n", err)
+		}
+	}
+	return nil
 }
 
 func usage() {
