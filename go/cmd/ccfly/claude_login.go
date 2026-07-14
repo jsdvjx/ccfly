@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -614,6 +615,13 @@ func writeCredentials(data []byte) (string, error) {
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		return "", err
+	}
+	// macOS:claude-code 以登录钥匙串(非本文件)为 OAuth 主源,文件会被钥匙串旧凭据遮蔽。放一个一次性
+	// 「待 seed」标记,下次起 claude 会话时在解锁的 tmux 上下文把本凭据写进钥匙串(见 control.wrapClaudeCmd)。
+	if runtime.GOOS == "darwin" {
+		if cdir := filepath.Join(home, ".ccfly"); os.MkdirAll(cdir, 0o755) == nil {
+			_ = os.WriteFile(filepath.Join(cdir, "keychain-seed-pending"), []byte("1"), 0o600)
+		}
 	}
 	return path, nil
 }

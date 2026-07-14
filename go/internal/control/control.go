@@ -538,7 +538,7 @@ func handleStart(w http.ResponseWriter, r *http.Request) {
 		args = append(args, "-c", req.Cwd)
 	}
 	if req.Cmd != "" {
-		args = append(args, req.Cmd)
+		args = append(args, wrapClaudeCmd(req.Cmd)) // macOS:起 claude 前把订阅凭据 seed 进登录钥匙串(见 keychain_darwin.go)
 	}
 	if out, err := tmuxCmd(args...).CombinedOutput(); err != nil {
 		ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+err.Error()+")")
@@ -632,7 +632,7 @@ func handleNew(w http.ResponseWriter, r *http.Request) {
 	for k, v := range req.EnvVars {
 		args = append(args, "-e", k+"="+v)
 	}
-	args = append(args, "-s", name, "-c", cwd, "claude"+suffix+" --session-id "+sid)
+	args = append(args, "-s", name, "-c", cwd, wrapClaudeCmd("claude"+suffix+" --session-id "+sid))
 	if out, e := tmuxCmd(args...).CombinedOutput(); e != nil {
 		ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+e.Error()+")")
 		return
@@ -713,7 +713,7 @@ func handleReload(w http.ResponseWriter, r *http.Request) {
 	if m := strings.TrimSpace(req.EnvVars["ANTHROPIC_MODEL"]); m != "" {
 		resumeCmd += " --model " + m
 	}
-	args = append(args, resumeCmd)
+	args = append(args, wrapClaudeCmd(resumeCmd)) // macOS:重载同样先 seed 钥匙串(见 keychain_darwin.go)
 	if out, e := tmuxCmd(args...).CombinedOutput(); e != nil {
 		ctrlErr(w, 500, "tmux: "+strings.TrimSpace(string(out))+" ("+e.Error()+")")
 		return
