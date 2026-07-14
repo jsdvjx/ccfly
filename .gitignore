@@ -45,3 +45,6 @@ pnpm-debug.log*
 # ccfly 粘贴/上传的图片暂存(运行时产物,非源码)
 .ccfly-uploads/
 /go/psmux.zip
+
+# Windows 安装器构建时从 webdist PNG 生成(build-windows-installer.sh)
+/scripts/windows/ccfly.ico
