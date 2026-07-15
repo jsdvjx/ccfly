@@ -33,7 +33,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // 以下三者生产恒为固定值;声明为 var 便于集成测试注入临时 socket/hosts 文件与非特权端口
@@ -51,6 +54,8 @@ var (
 
 // sniUsesHelper 报告本平台 SNI arm 是否走 root helper 双进程路径。darwin=是。
 func sniUsesHelper() bool { return true }
+
+func sniHelperFrontListenerCount() int { return len(sniHelperFront) }
 
 // sniArmReq 是 agent → helper 的 arm 请求(单行 JSON;连接保持=arm 租约)。
 type sniArmReq struct {
@@ -112,6 +117,10 @@ func (m *sniManager) setupViaHelper(cfg *SNIConfig) error {
 // RunSNIHelper 跑 root 特权 helper(独立 LaunchDaemon)。监听 unix 控制 socket,为非 root 的 agent
 // 承接 :443 与 /etc/hosts。每个连接=一次 arm 租约(新 arm 顶掉旧租约)。阻塞直到 socket 出错。
 func RunSNIHelper() error {
+	allowedUID, err := configuredSNIHelperUID()
+	if err != nil {
+		return err
+	}
 	_ = restoreUnixHosts(unixHostsPath) // 上次非正常退出可能残留 hosts 块 → 先清,保证 fail-open(不把 claude 钉死)
 	_ = os.Remove(sniHelperSocket)      // 清残留 socket 文件,否则 bind EADDRINUSE
 	ln, err := net.Listen("unix", sniHelperSocket)
@@ -119,20 +128,47 @@ func RunSNIHelper() error {
 		return err
 	}
 	defer ln.Close()
-	// agent 以普通用户身份连;本机 loopback 控制面仅能 arm/disarm SNI(低敏感),放宽到 0666 让用户可连。
-	_ = os.Chmod(sniHelperSocket, 0o666)
-	log.Printf("ccfly-sni-helper: listening on %s (root)", sniHelperSocket)
-	return (&sniHelper{hostsPath: unixHostsPath}).serve(ln)
+	// Filesystem ACL and peer credentials independently pin the privileged
+	// helper to the one agent UID selected at install time.
+	if err := os.Chown(sniHelperSocket, allowedUID, -1); err != nil {
+		return fmt.Errorf("chown helper socket to uid %d: %w", allowedUID, err)
+	}
+	if err := os.Chmod(sniHelperSocket, 0o600); err != nil {
+		return fmt.Errorf("chmod helper socket: %w", err)
+	}
+	log.Printf("ccfly-sni-helper: listening on %s (root, allowed_uid=%d)", sniHelperSocket, allowedUID)
+	return (&sniHelper{hostsPath: unixHostsPath, allowedUID: uint32(allowedUID), enforcePeer: true}).serve(ln)
+}
+
+func configuredSNIHelperUID() (int, error) {
+	if raw := strings.TrimSpace(os.Getenv("CCFLY_SNI_HELPER_UID")); raw != "" {
+		uid, err := strconv.Atoi(raw)
+		if err == nil && uid > 0 {
+			return uid, nil
+		}
+		return 0, fmt.Errorf("invalid CCFLY_SNI_HELPER_UID %q", raw)
+	}
+	// Backward-compatible fallback for an older installed plist: authorize the
+	// currently logged-in console user.  The next `ccfly install` persists it.
+	if fi, err := os.Stat("/dev/console"); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid > 0 {
+			return int(st.Uid), nil
+		}
+	}
+	return 0, errors.New("cannot determine non-root agent UID; reinstall ccfly while logged in")
 }
 
 // sniHelper 持单一 arm 租约。gen 做租约代际:EOF 撤租约时只撤自己那代,不误伤后来的新租约。
 // hostsPath 在构造时捕获(生产恒 /etc/hosts):disarm 触发时按捕获值写,不随全局漂移(测试隔离关键)。
 type sniHelper struct {
-	mu        sync.Mutex
-	hostsPath string
-	gen       uint64
-	listeners []net.Listener // 当前租约的 :443 v4+v6
-	hostsOn   bool
+	mu          sync.Mutex
+	hostsPath   string
+	allowedUID  uint32
+	enforcePeer bool
+	connWG      sync.WaitGroup // lets tests/shutdown wait for lease teardown to finish
+	gen         uint64
+	listeners   []net.Listener // 当前租约的 :443 v4+v6
+	hostsOn     bool
 }
 
 // serve accept 控制连接的循环,阻塞直到 ln 出错/关闭。
@@ -142,19 +178,30 @@ func (h *sniHelper) serve(ln net.Listener) error {
 		if err != nil {
 			return err
 		}
-		go h.serveConn(c)
+		h.connWG.Add(1)
+		go func() {
+			defer h.connWG.Done()
+			h.serveConn(c)
+		}()
 	}
 }
 
 func (h *sniHelper) serveConn(c net.Conn) {
 	defer c.Close()
+	if h.enforcePeer {
+		uid, err := unixPeerUID(c)
+		if err != nil || uid != h.allowedUID {
+			_ = writeJSONLine(c, sniArmResp{OK: false, Error: "unauthorized local uid"})
+			return
+		}
+	}
 	r := bufio.NewReader(c)
 	line, err := r.ReadBytes('\n')
 	if err != nil && len(line) == 0 {
 		return
 	}
 	var req sniArmReq
-	if e := json.Unmarshal(trimJSONLine(line), &req); e != nil || req.Cmd != "arm" || req.RelayPort == 0 {
+	if e := json.Unmarshal(trimJSONLine(line), &req); e != nil || !validSNIArmRequest(req) {
 		_ = writeJSONLine(c, sniArmResp{OK: false, Error: "bad arm request"})
 		return
 	}
@@ -168,12 +215,49 @@ func (h *sniHelper) serveConn(c net.Conn) {
 	h.disarm(gen)
 }
 
+func unixPeerUID(c net.Conn) (uint32, error) {
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return 0, errors.New("helper peer is not a unix connection")
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return 0, err
+	}
+	var cred *unix.Xucred
+	var sockErr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, sockErr = unix.GetsockoptXucred(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERCRED)
+	}); err != nil {
+		return 0, err
+	}
+	if sockErr != nil {
+		return 0, sockErr
+	}
+	return cred.Uid, nil
+}
+
+func validSNIArmRequest(req sniArmReq) bool {
+	if req.Cmd != "arm" || req.RelayPort < 1024 || req.RelayPort > 65535 || len(req.Hosts) != len(sniPinnedHosts) {
+		return false
+	}
+	for i := range sniPinnedHosts {
+		if req.Hosts[i] != sniPinnedHosts[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // arm 落地一次租约:顶掉旧租约 → 写 /etc/hosts 钉域 → 绑 :443 双栈 splice 到 relayPort。返回代际号。
 func (h *sniHelper) arm(req sniArmReq) (uint64, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.teardownLocked() // 顶掉旧租约(关旧 :443;hosts 下面覆盖写)
-	if err := writeUnixHosts(h.hostsPath, req.Hosts); err != nil {
+	// Never trust the request as root-owned hosts content, even after peer auth.
+	// The wire field remains for compatibility with older agents but must exactly
+	// match the compiled allowlist validated above.
+	if err := writeUnixHosts(h.hostsPath, sniPinnedHosts); err != nil {
 		return 0, err
 	}
 	h.hostsOn = true

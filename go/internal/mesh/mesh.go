@@ -497,15 +497,21 @@ func applyProxyCA(caPEM string) {
 	_ = os.Setenv("CCFLY_TMUX_PROXY_CA", path)
 }
 
-// refreshConfig 在连接/重连前向云端拉一次「动态配置」(GET /api/device/config,凭 mesh_token),
-// 更新并落盘 State 的 cloud_public_key / cloud_overlay_ip / proxy 策略。
-// 关键价值:**保存身份重连的设备不重新 enroll**,云端后来才下发的 proxy_port、或轮换后的
-// cloud_public_key,本来永远拿不到(只能手动改 State 或重新配对)。本函数让设备每次连接主动刷新,
-// 真正做到「策略默认就生效、无需显式操作」,并顺带自愈 cloud 公钥漂移导致的数据面不通。
-// 云端老版本(无此端点)/ 网络失败 → 静默沿用现有 State(优雅降级,绝不阻断连接)。
-func refreshConfig(ctx context.Context, st *State) {
+type deviceConfig struct {
+	CloudPublicKey string     `json:"cloud_public_key"`
+	CloudOverlayIP string     `json:"cloud_overlay_ip"`
+	ProxyPort      int        `json:"proxy_port"`
+	ProxyScheme    string     `json:"proxy_scheme"`
+	ProxyCA        string     `json:"proxy_ca"`
+	CanUseClaude   *bool      `json:"can_use_claude"`
+	CanUseProxy    *bool      `json:"can_use_proxy"`
+	CanUseMesh     *bool      `json:"can_use_mesh"`
+	SNI            *SNIConfig `json:"sni"`
+}
+
+func fetchDeviceConfig(ctx context.Context, st *State) (deviceConfig, error) {
 	if st.MeshToken == "" || st.Host == "" {
-		return
+		return deviceConfig{}, errors.New("device config identity is incomplete")
 	}
 	scheme := st.Scheme
 	if scheme == "" {
@@ -516,32 +522,37 @@ func refreshConfig(ctx context.Context, st *State) {
 	req, err := http.NewRequestWithContext(rctx, "GET",
 		scheme+"://"+st.Host+"/api/device/config?token="+url.QueryEscape(st.MeshToken), nil)
 	if err != nil {
-		return
+		return deviceConfig{}, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("ccfly: device config refresh failed: %v", err) // graceful: keep existing State
-		return
+		return deviceConfig{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("ccfly: device config refresh: HTTP %d", resp.StatusCode)
-		return
+		return deviceConfig{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	var c struct {
-		CloudPublicKey string     `json:"cloud_public_key"`
-		CloudOverlayIP string     `json:"cloud_overlay_ip"`
-		ProxyPort      int        `json:"proxy_port"`
-		ProxyScheme    string     `json:"proxy_scheme"`
-		ProxyCA        string     `json:"proxy_ca"`
-		CanUseClaude   *bool      `json:"can_use_claude"`
-		CanUseProxy    *bool      `json:"can_use_proxy"`
-		CanUseMesh     *bool      `json:"can_use_mesh"`
-		SNI            *SNIConfig `json:"sni"`
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return deviceConfig{}, err
 	}
+	var c deviceConfig
 	if err := json.Unmarshal(data, &c); err != nil {
-		log.Printf("ccfly: device config refresh: bad JSON: %v", err)
+		return deviceConfig{}, fmt.Errorf("bad JSON: %w", err)
+	}
+	return c, nil
+}
+
+// refreshConfig 在连接/重连前向云端拉一次「动态配置」(GET /api/device/config,凭 mesh_token),
+// 更新并落盘 State 的 cloud_public_key / cloud_overlay_ip / proxy 策略。
+// 关键价值:**保存身份重连的设备不重新 enroll**,云端后来才下发的 proxy_port、或轮换后的
+// cloud_public_key,本来永远拿不到(只能手动改 State 或重新配对)。本函数让设备每次连接主动刷新,
+// 真正做到「策略默认就生效、无需显式操作」,并顺带自愈 cloud 公钥漂移导致的数据面不通。
+// 云端老版本(无此端点)/ 网络失败 → 静默沿用现有 State(优雅降级,绝不阻断连接)。
+func refreshConfig(ctx context.Context, st *State) {
+	c, err := fetchDeviceConfig(ctx, st)
+	if err != nil {
+		log.Printf("ccfly: device config refresh failed: %v", err) // graceful: keep existing State
 		return
 	}
 	changed := false
@@ -579,13 +590,38 @@ func refreshConfig(ctx context.Context, st *State) {
 	}
 }
 
+// A stable /mesh WebSocket can live for days.  SNI account assignment and
+// revocation must therefore not wait for the next reconnect.  This loop fetches
+// only the runtime SNI segment and applies it through sniManager's own lock; it
+// deliberately does not mutate the persisted State or WG fields concurrently
+// with dialOnce.
+var sniPolicyRefreshInterval = 15 * time.Second
+
+func runSNIPolicyRefresher(ctx context.Context, st *State) {
+	t := time.NewTicker(sniPolicyRefreshInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c, err := fetchDeviceConfig(ctx, st)
+			if err != nil {
+				continue // full reconnect refresh logs failures; avoid periodic log spam
+			}
+			applyMeshSNI(&State{SNI: c.SNI})
+		}
+	}
+}
+
 func runTunnel(ctx context.Context, st *State) error {
-	go runSyncer(ctx, st)   // 后台把本地会话(摘要 + 全文)同步到云端归档;走公网控制面,与隧道状态无关
-	defer applyMeshSNI(nil) // 进程退出时卸载 SNI arm(恢复 resolv.conf,不留指向死本地 DNS 的配置)
+	go runSyncer(ctx, st)             // 后台把本地会话(摘要 + 全文)同步到云端归档;走公网控制面,与隧道状态无关
+	go runSNIPolicyRefresher(ctx, st) // 稳定隧道期间也收敛 SNI 登录/登出策略,不再等待重连
+	defer applyMeshSNI(nil)           // 进程退出时卸载 SNI arm(恢复 resolv.conf,不留指向死本地 DNS 的配置)
 	backoff := time.Second
 	for ctx.Err() == nil {
-		// 每次(重)连接前拉云端动态配置并重应用策略:登录后云端新绑定的 sni 账号 / 后加的 proxy 无需
-		// 重启进程,下次连接即生效(refreshConfig 优雅降级,与 dialOnce 顺序执行、无并发写 st)。
+		// 每次(重)连接前拉完整动态配置并重应用策略。稳定连接期间的 SNI 登录/登出另由
+		// runSNIPolicyRefresher 在 15s 内收敛；这里仍负责 WG 公钥/proxy 等持久状态且与 dialOnce 串行。
 		refreshConfig(ctx, st)
 		applyMeshProxy(st)
 		applyMeshSNI(st)

@@ -11,6 +11,9 @@ package svc
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
+	"syscall"
 )
 
 const sniHelperLabel = "com.ccfly.sni-helper"
@@ -31,6 +34,10 @@ func installSNIHelperDarwin(dryRun bool) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	agentUID, err := sniHelperAgentUID()
+	if err != nil {
+		return false, err
+	}
 	// 注意:无 UserName 键 = 以 root 运行。
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -40,13 +47,16 @@ func installSNIHelperDarwin(dryRun bool) (bool, error) {
     <string>%s</string>
     <string>sni-helper</string>
   </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>CCFLY_SNI_HELPER_UID</key><string>%d</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
 </dict></plist>
-`, sniHelperLabel, xmlEsc(bin), xmlEsc(logPath), xmlEsc(logPath))
+`, sniHelperLabel, xmlEsc(bin), agentUID, xmlEsc(logPath), xmlEsc(logPath))
 
 	if dryRun {
 		fmt.Printf("# sni-helper bin   -> %s\n# sni-helper plist -> %s (root, 无 UserName)\n\n%s", bin, plistPath, plist)
@@ -67,6 +77,23 @@ func installSNIHelperDarwin(dryRun bool) (bool, error) {
 		return false, fmt.Errorf("launchctl load sni-helper: %w", err)
 	}
 	return true, nil
+}
+
+func sniHelperAgentUID() (int, error) {
+	if raw := strings.TrimSpace(os.Getenv("SUDO_UID")); raw != "" {
+		if uid, err := strconv.Atoi(raw); err == nil && uid > 0 {
+			return uid, nil
+		}
+	}
+	if uid := os.Getuid(); uid > 0 { // dry-run or direct per-user invocation
+		return uid, nil
+	}
+	if fi, err := os.Stat("/dev/console"); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid > 0 {
+			return int(st.Uid), nil
+		}
+	}
+	return 0, fmt.Errorf("cannot determine the non-root agent UID; run install from the logged-in user with sudo")
 }
 
 // uninstallSNIHelperDarwin 摘掉 root helper 守护。非 root 静默跳过(装不了也拆不了)。

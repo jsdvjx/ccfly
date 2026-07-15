@@ -3,10 +3,10 @@ package mesh
 // snistatus.go — SNI arm 运行状态自检 + 可观测(回答「用户装了最新版,如何确定他的 SNI proxy 正常」)。
 //
 // 两类信号:
-//   ① passive 快照(零 I/O,读 sniMgr):armed(setup 成功)、account/exit、:53 DNS 起没起、:443 监听数、
-//      resolver 是否指向本地、overlay 是否就绪、since、最后一次 setup 失败原因、平台。
+//   ① passive 快照(零 I/O,读 sniMgr):armed(setup 成功)、account/exit、:53 DNS 起没起(仅 Linux)、
+//      生产 :443 监听数、系统拦截是否已安装、overlay 是否就绪、since、最后一次 setup 失败原因、平台。
 //   ② active 探测(缓存,可选同步刷新):
-//        - dns_ok:向 127.0.0.1:53 解析 canary,期望 loopback —— 证明内嵌 DNS 起且 intercept 命中。
+//        - dns_ok(兼容字段):Linux 强制查 127.0.0.1:53;hosts 平台走系统解析,均要求 canary→loopback。
 //        - path_ok:连本地 :443(生产入口)发 SNI=canary 的真实 TLS 握手 —— 握手成功 = 本地 :443 监听 +
 //          overlay + 账号出口 byway-sni + 源规则匹配 + 真出网 全通(证书对 canary 校验通过,端到端真证书)。
 //          任一环断(非 root 未 bind :443 / overlay 断 / 源规则不匹配 fail-closed / 出口不可达)→ 握手失败。
@@ -44,7 +44,7 @@ type sniSnapshot struct {
 	Intercept       []string  `json:"intercept,omitempty"`
 	DNSBound        bool      `json:"dns_bound"`        // :53 UDP 起
 	Listeners       int       `json:"listeners"`        // :443 监听数(健康=2:v4+v6)
-	ResolverPointed bool      `json:"resolver_pointed"` // pointResolver 成功(系统解析已指向本地)
+	ResolverPointed bool      `json:"resolver_pointed"` // 系统拦截已安装(resolver 或 hosts/helper)
 	OverlayUp       bool      `json:"overlay_up"`       // activeNet != nil(WG overlay 就绪,:443 relay 才拨得出去)
 	LastError       string    `json:"last_error,omitempty"`
 	Since           int64     `json:"since,omitempty"` // arm 起来的 unix 秒
@@ -55,7 +55,7 @@ type sniSnapshot struct {
 // sniProbe 是一次主动自检的结果。
 type sniProbe struct {
 	Canary string `json:"canary"`
-	DNSOK  bool   `json:"dns_ok"`  // 127.0.0.1:53 解析 canary → loopback
+	DNSOK  bool   `json:"dns_ok"`  // 兼容字段:实际表示系统拦截可用(DNS 模式=:53;hosts 模式=系统解析到 loopback)
 	PathOK bool   `json:"path_ok"` // 127.0.0.1:443 → overlay → exit,TLS 握手到 canary 成功
 	Error  string `json:"error,omitempty"`
 	MS     int64  `json:"ms"`
@@ -72,6 +72,13 @@ func (m *sniManager) status(fresh bool) sniSnapshot {
 		Listeners: len(m.listeners),
 	}
 	s.ResolverPointed = m.resolvOn
+	if m.helperConn != nil {
+		// macOS helper owns the real v4/v6 :443 fronts and /etc/hosts while
+		// the agent owns one unprivileged relay listener.  Report production
+		// ingress state, not the implementation-detail relay count.
+		s.Listeners = sniHelperFrontListenerCount()
+		s.ResolverPointed = true
+	}
 	s.LastError = m.lastErr
 	var exit SNIExit
 	if m.cur != nil {
@@ -97,15 +104,24 @@ func (m *sniManager) status(fresh bool) sniSnapshot {
 var (
 	probeCache   atomic.Pointer[sniProbe]
 	probeRunning atomic.Bool
-	probeMu      sync.Mutex // fresh 路径单飞
+	probeGen     atomic.Uint64 // config generation; an old async probe must not populate a new account's cache
+	probeMu      sync.Mutex    // fresh 路径单飞
 )
 
+func resetSNIProbe() {
+	probeGen.Add(1)
+	probeCache.Store(nil)
+}
+
 func cachedProbe(exit SNIExit, fresh bool) *sniProbe {
+	gen := probeGen.Load()
 	if fresh {
 		probeMu.Lock()
 		defer probeMu.Unlock()
 		p := runSNIProbe(exit)
-		probeCache.Store(p)
+		if probeGen.Load() == gen {
+			probeCache.Store(p)
+		}
 		return p
 	}
 	p := probeCache.Load()
@@ -116,7 +132,9 @@ func cachedProbe(exit SNIExit, fresh bool) *sniProbe {
 			probeMu.Lock()
 			np := runSNIProbe(exit)
 			probeMu.Unlock()
-			probeCache.Store(np)
+			if probeGen.Load() == gen {
+				probeCache.Store(np)
+			}
 		}()
 	}
 	return p // 可能为 nil(首次探测尚未完成);上报/展示端按「探测中」处理
@@ -126,7 +144,7 @@ func cachedProbe(exit SNIExit, fresh bool) *sniProbe {
 func runSNIProbe(exit SNIExit) *sniProbe {
 	start := time.Now()
 	p := &sniProbe{Canary: sniCanary, At: start.Unix()}
-	p.DNSOK = probeDNSLoopback(sniCanary)
+	p.DNSOK = probeSNIInterception(sniCanary)
 	ok, err := probeSNIPath(sniCanary)
 	p.PathOK = ok
 	if err != nil {
@@ -134,6 +152,27 @@ func runSNIProbe(exit SNIExit) *sniProbe {
 	}
 	p.MS = time.Since(start).Milliseconds()
 	return p
+}
+
+// probeSNIInterception verifies the platform's actual interception mechanism.
+// Linux uses the embedded :53 DNS.  Windows and current macOS use hosts, so a
+// forced query to 127.0.0.1:53 would merely test an unrelated local resolver.
+func probeSNIInterception(host string) bool {
+	if resolverNeedsLocalDNS() && !sniUsesHelper() {
+		return probeDNSLoopback(host)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return false
+	}
+	for _, raw := range addrs {
+		if ip := net.ParseIP(raw); ip != nil && ip.IsLoopback() {
+			return true
+		}
+	}
+	return false
 }
 
 // probeDNSLoopback 强制走 127.0.0.1:53 解析 host,命中 loopback 即证明内嵌 DNS 起且 intercept 命中。

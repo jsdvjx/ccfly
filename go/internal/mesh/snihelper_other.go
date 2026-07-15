@@ -11,6 +11,8 @@ import "errors"
 // sniUsesHelper 报告本平台 SNI arm 是否走 root helper 双进程路径。非 darwin=否(走 sni.go 内联直绑)。
 func sniUsesHelper() bool { return false }
 
+func sniHelperFrontListenerCount() int { return 0 }
+
 // setupViaHelper 在非 darwin 平台永不被调(sniUsesHelper=false 时 setupLocked 走内联路径);留桩保证编译。
 func (m *sniManager) setupViaHelper(cfg *SNIConfig) error {
 	return errors.New("sni helper: darwin only")

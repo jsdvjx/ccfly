@@ -12,8 +12,8 @@ package mesh
 //   ② 本地 :443 双栈 TCP(127.0.0.1 + [::1]):把连接经 overlay netstack 透传到 exit(账号 byway-sni),
 //      byway-sni peek SNI 后按设备源 IP 的池规则从账号 IP 出网。
 //   ③ 系统解析指向(pointResolver,三平台各异):Linux=/etc/resolv.conf 指向 127.0.0.1(备份原文件,
-//      真上游列为次级 nameserver 做 fail-open);macOS=/etc/resolver/<域> scoped resolver;
-//      Windows=hosts 托管块把精确主机名钉到 loopback(需管理员 token,见 sni_hosts.go)。
+//      真上游列为次级 nameserver 做 fail-open);macOS root helper 与 Windows 使用 hosts 托管块把
+//      精确主机名钉到 loopback(见 sni_hosts.go)。
 //
 // 失败安全:任一组件起不来(非 root/非管理员无法 bind :53/:443 或写 hosts)→ 不改系统解析、不 brick,只 log。
 // 卸载:恢复 resolv.conf、停 DNS、关 :443。幂等(重复无段 = 保持卸载态)。
@@ -113,6 +113,7 @@ func (m *sniManager) apply(cfg *SNIConfig) {
 	m.cur = cfg
 	m.since = time.Now()
 	m.lastErr = ""
+	resetSNIProbe()
 	log.Printf("ccfly: SNI arm up (account=%s exit=%s intercept=%v)", cfg.Account, net.JoinHostPort(cfg.Exit.Host, strconv.Itoa(cfg.Exit.Port)), cfg.Intercept)
 }
 
@@ -187,6 +188,7 @@ func (m *sniManager) teardownLocked() {
 	}
 	m.cur = nil
 	m.since = time.Time{}
+	resetSNIProbe()
 }
 
 // serve443 accept 本地 :443 连接,经 overlay netstack 透传到 exit(账号 byway-sni)。

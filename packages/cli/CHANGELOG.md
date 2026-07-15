@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.15.3
+
+### Patch Changes
+
+- Harden SNI policy refresh and the macOS helper, and make one-shot credential acknowledgements retry until the server confirms cleanup.
+
 ## 0.15.2
 
 ### Patch Changes

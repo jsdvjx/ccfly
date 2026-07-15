@@ -231,7 +231,11 @@ func runClaudeLoginBackground(tgt mesh.LoginTarget, email, node, egress string) 
 	}
 	control.TrustFolder("") // 凭证有了还不够:标记 TUI 首启引导已完成(dir 空=只 onboarding),否则新设备起会话被引导界面挡住
 
-	_ = loginAck(ctx, tgt, started.JobID)
+	// Ack now also destroys the one-shot plaintext claim in egress-unit. Retry transient failures instead
+	// of silently leaving it for the server-side TTL reaper; credentials are already durable locally.
+	if err := loginAckRetry(ctx, tgt, started.JobID); err != nil {
+		log.Printf("ccfly-bg: login ack cleanup deferred to server TTL: %v", err)
+	}
 
 	finalAcct := firstNonEmpty(res.AccountEmail, started.AccountEmail, email)
 	v6 := firstNonEmpty(res.EgressV6, started.EgressV6)
@@ -528,6 +532,23 @@ func awaitHint(status string) string {
 
 func loginAck(ctx context.Context, t mesh.LoginTarget, jobID string) error {
 	return loginDo(ctx, t, http.MethodPost, "/api/device/login/ack", url.Values{"job_id": {jobID}}, nil, nil)
+}
+
+func loginAckRetry(ctx context.Context, t mesh.LoginTarget, jobID string) error {
+	var last error
+	for i, delay := range []time.Duration{0, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second} {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		if last = loginAck(ctx, t, jobID); last == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("ack failed after retries: %w", last)
 }
 
 // loginDo 发一次带 mesh_token 的请求,2xx 解析到 out(可空);非 2xx 取云端 {error}。

@@ -56,8 +56,16 @@ func startTestHelper(t *testing.T) {
 	}
 	_ = os.Chmod(sniHelperSocket, 0o666)
 	h := &sniHelper{hostsPath: unixHostsPath}
-	go func() { _ = h.serve(ln) }()
-	t.Cleanup(func() { ln.Close() })
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		_ = h.serve(ln)
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-serveDone
+		h.connWG.Wait()
+	})
 }
 
 // armClient 模拟 agent 侧线格:连 socket、发 arm、读应答。返回保持打开的控制连接(关它=撤租约)。
@@ -129,7 +137,7 @@ func TestHelperArmWritesHostsAndDisarmRestores(t *testing.T) {
 	startTestHelper(t)
 	echoPort := startEchoServer(t)
 
-	ctrl, resp := armClient(t, echoPort, []string{"api.anthropic.com", "claude.ai"})
+	ctrl, resp := armClient(t, echoPort, sniPinnedHosts)
 	if !resp.OK {
 		t.Fatalf("arm not ok: %+v", resp)
 	}
@@ -172,7 +180,7 @@ func TestHelperSplicesFrontToRelay(t *testing.T) {
 	front.Close() // 立刻释放,让 helper arm 时重新绑同一端口
 	sniHelperFront = []string{frontAddr}
 
-	ctrl, resp := armClient(t, echoPort, []string{"api.anthropic.com"})
+	ctrl, resp := armClient(t, echoPort, sniPinnedHosts)
 	if !resp.OK {
 		t.Fatalf("arm not ok: %+v", resp)
 	}
@@ -212,12 +220,12 @@ func TestHelperLeaseSupersedeKeepsNewHosts(t *testing.T) {
 	startTestHelper(t)
 	echoPort := startEchoServer(t)
 
-	old, r1 := armClient(t, echoPort, []string{"api.anthropic.com"})
+	old, r1 := armClient(t, echoPort, sniPinnedHosts)
 	if !r1.OK {
 		t.Fatalf("first arm not ok: %+v", r1)
 	}
-	// 第二次 arm(不同主机名)顶掉第一次。
-	newer, r2 := armClient(t, echoPort, []string{"claude.ai"})
+	// 第二次合法 arm 顶掉第一次。
+	newer, r2 := armClient(t, echoPort, sniPinnedHosts)
 	if !r2.OK {
 		t.Fatalf("second arm not ok: %+v", r2)
 	}
@@ -232,6 +240,66 @@ func TestHelperLeaseSupersedeKeepsNewHosts(t *testing.T) {
 	if !fileHas(t, hostsPath, "127.0.0.1 claude.ai") || !fileHas(t, hostsPath, hostsBeginPrefix) {
 		b, _ := os.ReadFile(hostsPath)
 		t.Fatalf("stale-lease EOF wrongly tore down current lease:\n%s", b)
+	}
+}
+
+func TestHelperRejectsArbitraryHostsAndPrivilegedRelay(t *testing.T) {
+	withHelperTestEnv(t)
+	startTestHelper(t)
+
+	c, resp := armClient(t, 8080, []string{"bank.example"})
+	c.Close()
+	if resp.OK {
+		t.Fatal("root helper accepted arbitrary hosts")
+	}
+	c, resp = armClient(t, 443, sniPinnedHosts)
+	c.Close()
+	if resp.OK {
+		t.Fatal("root helper accepted a privileged/recursive relay port")
+	}
+}
+
+func TestUnixPeerUID(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "ccfly-peeruid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	ln, err := net.Listen("unix", filepath.Join(dir, "peer.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	got := make(chan uint32, 1)
+	errs := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			errs <- err
+			return
+		}
+		defer c.Close()
+		uid, err := unixPeerUID(c)
+		if err != nil {
+			errs <- err
+			return
+		}
+		got <- uid
+	}()
+	c, err := net.Dial("unix", filepath.Join(dir, "peer.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Close()
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case uid := <-got:
+		if uid != uint32(os.Getuid()) {
+			t.Fatalf("peer uid=%d want=%d", uid, os.Getuid())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer credential lookup timed out")
 	}
 }
 
