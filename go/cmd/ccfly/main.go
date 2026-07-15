@@ -72,6 +72,7 @@ func main() {
 	ctx, stop := signalContext()
 	defer stop()
 	ensureUTF8Locale()
+	configureClaudeLoginControlHooks()
 
 	// 能力档闸门(用户类型):按当前档关闭敏感命令。connect→MeshJoin(restricted 禁、instance 放行)、
 	// install/uninstall→Install、claude→Claude。仅「加严」,full 档零影响。

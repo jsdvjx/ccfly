@@ -32,18 +32,72 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/nacl/box"
 
 	"github.com/jsdvjx/ccfly/go/internal/control"
 	"github.com/jsdvjx/ccfly/go/internal/mesh"
+	"github.com/jsdvjx/ccfly/go/internal/profile"
 )
+
+var claudeLoginStartMu sync.Mutex
+
+// configureClaudeLoginControlHooks lets the authenticated cloud gateway start
+// the exact same device-bound login path as `ccfly claude login`. The original
+// CLI remains unchanged and continues to be a first-class entry point.
+func configureClaudeLoginControlHooks() {
+	control.ClaudeLoginStartFn = func(host, email, handoff string) error {
+		claudeLoginStartMu.Lock()
+		defer claudeLoginStartMu.Unlock()
+		if !profile.Current().Claude {
+			return fmt.Errorf("当前设备能力档不允许 Claude 凭据登录")
+		}
+		tgt, err := pickLoginTarget(host)
+		if err != nil {
+			return err
+		}
+		if !mesh.ClaudeLoginAllowed(tgt.Host) {
+			return fmt.Errorf("该账号未获授权使用 Claude 账号功能")
+		}
+		if current, _ := mesh.LoadLoginStatus(); current != nil && !current.Terminal() && current.PID > 0 && processRunning(current.PID) {
+			return fmt.Errorf("设备已有 Claude 登录任务在运行")
+		}
+		var handoffPath string
+		if handoff != "" {
+			handoffPath, err = validateClaudeAutoHandoff(tgt, email, handoff, time.Now())
+			if err != nil {
+				return err
+			}
+		}
+		if err := forkLoginBackground(tgt, email, "", ""); err != nil {
+			return err
+		}
+		if handoffPath != "" {
+			_ = os.Remove(handoffPath)
+		}
+		return nil
+	}
+	control.ClaudeLoginStatusFn = func() (any, error) {
+		status, err := mesh.LoadLoginStatus()
+		if err != nil || status == nil {
+			return status, err
+		}
+		return map[string]any{
+			"phase": status.Phase, "job_id": status.JobID, "email": status.Email,
+			"egress_v6": status.EgressV6, "host": status.Host, "error": status.Error,
+			"started_at": status.StartedAt, "updated_at": status.UpdatedAt,
+			"cloud_status": status.CloudStatus,
+			"alive":        status.PID > 0 && processRunning(status.PID),
+		}, nil
+	}
+}
 
 // runClaude 分发 `ccfly claude <sub>`。
 func runClaude(args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--email <e>] [--node <ip>] [--egress <v6>] [--host <cloud>]")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--auto] [--email <e>] [--node <ip>] [--egress <v6>] [--host <cloud>]")
 		fmt.Fprintln(os.Stderr, "       ccfly claude logout [--host <cloud>]")
 		fmt.Fprintln(os.Stderr, "       ccfly claude status [--host <cloud>]")
 		return nil
@@ -66,9 +120,10 @@ func runClaudeLogin(args []string) error {
 	node := fs.String("node", "", "out node overlay IP (omit to reuse the account's provisioned egress)")
 	egress := fs.String("egress", "", "egress /128 (omit to reuse)")
 	host := fs.String("host", "", "cloud host (default: the only enrolled cloud)")
+	auto := fs.Bool("auto", false, "生成网页人工登录接力链接；凭据就绪后自动密封回本设备")
 	bg := fs.Bool("_bg", false, "")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--email <e>] [--node <ip>] [--egress <v6>] [--host <cloud>]")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--auto] [--email <e>] [--node <ip>] [--egress <v6>] [--host <cloud>]")
 		fmt.Fprintln(os.Stderr, "  省略 --email:云端自动选号(共享账号里按 claude 用量 + 分配次数挑一个)。")
 		fmt.Fprintln(os.Stderr, "  给 --email:登该(自有)账号,复用其已 provision 的出口;或加 --node+--egress 一次性创建+登录。")
 		fs.PrintDefaults()
@@ -83,6 +138,18 @@ func runClaudeLogin(args []string) error {
 	// (未登录 / 不在准入组)。nil=未知(老云端/未刷新)一律放行。真正鉴权仍在云端(会 403)。
 	if !mesh.ClaudeLoginAllowed(tgt.Host) {
 		return fmt.Errorf("该账号未获授权使用 Claude 账号功能(内部功能);请联系管理员将你加入准入用户组")
+	}
+	if *auto {
+		if *bg || strings.TrimSpace(*node) != "" || strings.TrimSpace(*egress) != "" {
+			return fmt.Errorf("--auto 不能与 --node、--egress 或内部 --_bg 同时使用")
+		}
+		link, err := createClaudeAutoHandoff(tgt, strings.TrimSpace(*email), time.Now())
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stdout, link)
+		fmt.Fprintln(os.Stderr, "ccfly: 请在 30 分钟内打开上方链接完成人工登录；凭据就绪后会自动写入本设备。")
+		return nil
 	}
 
 	if *bg {

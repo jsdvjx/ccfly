@@ -876,6 +876,7 @@ func applyClaudeLoginProxy() bool {
 type LoginTarget struct {
 	Host       string
 	Scheme     string
+	DeviceID   string
 	MeshToken  string
 	PrivateKey string // 设备 WG 私钥(base64);开 sealed-box 用
 	PublicKey  string
@@ -899,7 +900,7 @@ func LoginTargets() []LoginTarget {
 			continue
 		}
 		out = append(out, LoginTarget{
-			Host: st.Host, Scheme: st.Scheme, MeshToken: st.MeshToken,
+			Host: st.Host, Scheme: st.Scheme, DeviceID: st.DeviceID, MeshToken: st.MeshToken,
 			PrivateKey: st.PrivateKey, PublicKey: st.PublicKey,
 		})
 	}
