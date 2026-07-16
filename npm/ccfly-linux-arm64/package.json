@@ -1,6 +1,6 @@
 {
   "name": "ccfly-linux-arm64",
-  "version": "0.15.3",
+  "version": "0.15.4",
   "description": "Prebuilt ccfly Go binary for linux/arm64 (glibc).",
   "license": "MIT",
   "os": [
