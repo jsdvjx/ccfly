@@ -83,9 +83,17 @@ echo "build-binaries: targets=${TARGETS}"
 # Set SKIP_WEB=1 to reuse whatever is already staged (e.g. fast Go-only rebuild).
 if [[ "${SKIP_WEB:-0}" == "1" ]]; then
   echo "build-binaries: SKIP_WEB=1 — reusing existing go/internal/control/webdist"
-else
+elif [[ -d "${CCFLY_TTYD_UI_DIR:-${ROOT_DIR}/../ccfly-ttyd-ui}" ]]; then
   echo "build-binaries: building web UI (scripts/build-web.sh)"
   bash "${SCRIPT_DIR}/build-web.sh"
+elif [[ -f "${GO_DIR}/internal/control/webdist/index.html" ]]; then
+  # The former ccfly-ttyd-ui repository is no longer part of a clean checkout.
+  # Release/CI builds must remain reproducible from this repository alone, so
+  # use the reviewed, committed embed when the optional UI source is absent.
+  echo "build-binaries: ttyd-ui source unavailable — reusing committed go/internal/control/webdist"
+else
+  echo "build-binaries: missing both ttyd-ui source and committed webdist" >&2
+  exit 1
 fi
 
 # --- sync subpackage versions to lockstep ----------------------------------
