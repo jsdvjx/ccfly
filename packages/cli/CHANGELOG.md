@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.15.5
+
+### Patch Changes
+
+- agent 云端链路(配对/控制面/mesh WSS/会话同步/claude login)不再读 HTTP(S)\_PROXY/ALL_PROXY 环境变量,一律直连;确需代理用 CCFLY_PROXY 显式指定。修复 Windows 注册表残留代理变量导致计划任务里 connect 稳定 EOF 的问题。
+
 ## 0.15.4
 
 ### Patch Changes

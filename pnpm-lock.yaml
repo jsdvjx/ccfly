@@ -55,23 +55,7 @@ importers:
 
   npm/ccfly-win32-x64: {}
 
-  packages/cli:
-    optionalDependencies:
-      ccfly-darwin-arm64:
-        specifier: 0.15.4
-        version: link:../../npm/ccfly-darwin-arm64
-      ccfly-darwin-x64:
-        specifier: 0.15.4
-        version: link:../../npm/ccfly-darwin-x64
-      ccfly-linux-arm64:
-        specifier: 0.15.4
-        version: link:../../npm/ccfly-linux-arm64
-      ccfly-linux-x64:
-        specifier: 0.15.4
-        version: link:../../npm/ccfly-linux-x64
-      ccfly-win32-x64:
-        specifier: 0.15.4
-        version: link:../../npm/ccfly-win32-x64
+  packages/cli: {}
 
   packages/react:
     dependencies:
