@@ -583,7 +583,6 @@ func refreshConfig(ctx context.Context, st *State) {
 	if c.ProxyCA != st.ProxyCA {
 		st.ProxyCA, changed = c.ProxyCA, true
 	}
-	enrichSNIFromDomainList(c.SNI) // 设备直接读 OSS 权威清单,覆盖 pinned/apex + 生效 ETag(失败保留 cloud 兜底)
 	if !sameSNI(st.SNI, c.SNI) {
 		st.SNI, changed = c.SNI, true
 	}
@@ -612,7 +611,6 @@ func runSNIPolicyRefresher(ctx context.Context, st *State) {
 			if err != nil {
 				continue // full reconnect refresh logs failures; avoid periodic log spam
 			}
-			enrichSNIFromDomainList(c.SNI) // 设备直接读 OSS 清单(15s 周期收敛),失败保留 cloud 兜底
 			applyMeshSNI(&State{SNI: c.SNI})
 		}
 	}
