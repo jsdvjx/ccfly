@@ -3,10 +3,19 @@
 package svc
 
 import (
+	"errors"
 	"os/user"
 
 	"golang.org/x/sys/windows"
 )
+
+// hasSystemd / startDetachedAgent exist only so the (Linux-only) installLinux
+// path compiles on Windows; they are never reached here.
+func hasSystemd() bool { return false }
+
+func startDetachedAgent(bin string, args, env []string, logPath string) error {
+	return errors.New("detached agent fallback is not supported on windows")
+}
 
 func isRoot() bool {
 	var sid *windows.SID

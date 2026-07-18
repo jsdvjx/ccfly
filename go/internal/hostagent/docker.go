@@ -50,6 +50,28 @@ func (d *docker) stop(name string) error {
 	return nil
 }
 
+// clearData 清空一个实例的用户数据但保留容器与 ~/.ccfly/conn-* 接入身份。
+// 先确保容器在跑,再在容器内以 app 用户结束 Claude/tmux 并清理受控目录;最后 restart
+// 让 entrypoint 重建 onboarding 状态和首个干净会话。命令本身不拼接 name,避免 shell 注入。
+func (d *docker) clearData(name string) error {
+	if out, err := exec.Command(d.bin, "start", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("docker start %s: %v: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	const clear = `set -eu
+tmux kill-server >/dev/null 2>&1 || true
+find /home/app/workspace -mindepth 1 -delete
+find /home/app/.claude -mindepth 1 -delete
+rm -f /home/app/.claude.json /home/app/.ccfly/panemap.json
+rm -rf /home/app/.ccfly/uploads`
+	if out, err := exec.Command(d.bin, "exec", "-u", "app", name, "sh", "-c", clear).CombinedOutput(); err != nil {
+		return fmt.Errorf("docker exec clear-data %s: %v: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command(d.bin, "restart", name).CombinedOutput(); err != nil {
+		return fmt.Errorf("docker restart %s: %v: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 // list 返回本机由 ccfly 托管的容器(name<TAB>status,逐行)。
 func (d *docker) list() (string, error) {
 	out, err := exec.Command(d.bin, "ps", "-a",

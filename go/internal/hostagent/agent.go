@@ -1,5 +1,5 @@
 // Package hostagent 实现 ccfly 主机代理(ccfly-hostd)的控制面:一个很小的 HTTP 接口
-// (spawn / stop / instances),由 ccfly-hostd 经 overlay expose 桥暴露给 cloud 调用,
+// (spawn / stop / clear-data / instances),由 ccfly-hostd 经 overlay expose 桥暴露给 cloud 调用,
 // 据此在本 VM 上 `docker run` 每用户的 ccfly 实例容器。它只 shell out 到 `docker`,
 // 不含任何 Claude / tmux / control-service 代码。
 //
@@ -53,6 +53,7 @@ func Handler(cfg Config) http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("POST /spawn", cfg.auth(func(w http.ResponseWriter, r *http.Request) { handleSpawn(w, r, d) }))
 	mux.HandleFunc("POST /stop", cfg.auth(func(w http.ResponseWriter, r *http.Request) { handleStop(w, r, d) }))
+	mux.HandleFunc("POST /clear-data", cfg.auth(func(w http.ResponseWriter, r *http.Request) { handleClearData(w, r, d) }))
 	mux.HandleFunc("GET /instances", cfg.auth(func(w http.ResponseWriter, r *http.Request) { handleList(w, r, d) }))
 	return mux
 }
@@ -144,6 +145,30 @@ func handleStop(w http.ResponseWriter, r *http.Request, d *docker) {
 		return
 	}
 	if err := d.stop(name); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleClearData 清掉实例里的用户工作区、Claude 会话记录和上传缓存,随后重启容器。
+// 容器、创建时注入的 env 与 ~/.ccfly/conn-* 接入身份均保留,所以它会以同一 device id
+// 重新上线并由 entrypoint 自动创建一个干净会话。
+func handleClearData(w http.ResponseWriter, r *http.Request, d *docker) {
+	var req stopReq
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	name := req.Name
+	if name == "" && req.DeviceID != "" {
+		name = "ccfly-" + req.DeviceID
+	}
+	if name == "" {
+		http.Error(w, "name or device_id required", http.StatusBadRequest)
+		return
+	}
+	if err := d.clearData(name); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}

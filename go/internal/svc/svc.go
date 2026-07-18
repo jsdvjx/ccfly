@@ -444,6 +444,23 @@ WantedBy=%s
 	if err := copyExe(self, binPath, 0o755); err != nil {
 		return fmt.Errorf("install binary: %w", err)
 	}
+
+	// No systemd (bare container / minimal image): we can't register a unit, but
+	// pairing already succeeded, so keep the device online by launching the agent
+	// detached — and tell the user how to make it persist (their entrypoint / init).
+	// Far better than hard-failing with `systemctl: not found` after pairing.
+	if !hasSystemd() {
+		logPath := filepath.Join(home, ".ccfly", p.BinName+".log")
+		_ = os.MkdirAll(filepath.Dir(logPath), 0o755)
+		env := append(os.Environ(), "HOME="+home, "PATH="+svcPATH)
+		if err := startDetachedAgent(binPath, p.Args, env, logPath); err != nil {
+			return fmt.Errorf("未检测到 systemd,且后台直接启动失败: %w", err)
+		}
+		fmt.Printf("✓ 未检测到 systemd:已在后台直接启动(容器/精简系统)\n  bin: %s\n  logs: %s\n  ⚠ 重启不会自动拉起——如需持久,请把这条加入容器 entrypoint / 开机脚本:\n    %s %s\n",
+			binPath, logPath, binPath, strings.Join(p.Args, " "))
+		return nil
+	}
+
 	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
 		return err
 	}
