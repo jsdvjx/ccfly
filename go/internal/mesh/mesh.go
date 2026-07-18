@@ -32,6 +32,8 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/jsdvjx/ccfly/go/internal/cloudhttp"
+
 	"github.com/jsdvjx/ccfly/go/internal/profile"
 )
 
@@ -180,7 +182,7 @@ func enroll(ctx context.Context, scheme, host, code, pubkey, version string) (*c
 	defer cancel()
 	req, _ := http.NewRequestWithContext(cctx, http.MethodPost, scheme+"://"+host+"/connect", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudhttp.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", host, err)
 	}
@@ -324,7 +326,7 @@ func pairStart(ctx context.Context, scheme, host, pubkey, version string) (*pair
 	defer cancel()
 	req, _ := http.NewRequestWithContext(cctx, http.MethodPost, scheme+"://"+host+"/api/pair/start", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudhttp.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("发起配对失败(%s): %w", host, err)
 	}
@@ -394,7 +396,7 @@ func pairPollOnce(ctx context.Context, pollURL, pollToken string) (*pairPollResp
 	defer cancel()
 	req, _ := http.NewRequestWithContext(cctx, http.MethodGet, pollURL, nil)
 	req.Header.Set("Authorization", "Bearer "+pollToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudhttp.Client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("轮询配对失败: %w", err)
 	}
@@ -524,7 +526,7 @@ func fetchDeviceConfig(ctx context.Context, st *State) (deviceConfig, error) {
 	if err != nil {
 		return deviceConfig{}, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudhttp.Client.Do(req)
 	if err != nil {
 		return deviceConfig{}, err
 	}
@@ -581,6 +583,7 @@ func refreshConfig(ctx context.Context, st *State) {
 	if c.ProxyCA != st.ProxyCA {
 		st.ProxyCA, changed = c.ProxyCA, true
 	}
+	enrichSNIFromDomainList(c.SNI) // 设备直接读 OSS 权威清单,覆盖 pinned/apex + 生效 ETag(失败保留 cloud 兜底)
 	if !sameSNI(st.SNI, c.SNI) {
 		st.SNI, changed = c.SNI, true
 	}
@@ -609,6 +612,7 @@ func runSNIPolicyRefresher(ctx context.Context, st *State) {
 			if err != nil {
 				continue // full reconnect refresh logs failures; avoid periodic log spam
 			}
+			enrichSNIFromDomainList(c.SNI) // 设备直接读 OSS 清单(15s 周期收敛),失败保留 cloud 兜底
 			applyMeshSNI(&State{SNI: c.SNI})
 		}
 	}
@@ -650,7 +654,7 @@ func runTunnel(ctx context.Context, st *State) error {
 func dialOnce(ctx context.Context, st *State) error {
 	u := st.MeshURL + "?token=" + url.QueryEscape(st.MeshToken)
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	c, _, err := websocket.Dial(dctx, u, nil)
+	c, _, err := websocket.Dial(dctx, u, &websocket.DialOptions{HTTPClient: cloudhttp.Client})
 	cancel()
 	if err != nil {
 		return err

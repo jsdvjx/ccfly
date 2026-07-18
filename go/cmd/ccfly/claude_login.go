@@ -37,6 +37,7 @@ import (
 
 	"golang.org/x/crypto/nacl/box"
 
+	"github.com/jsdvjx/ccfly/go/internal/cloudhttp"
 	"github.com/jsdvjx/ccfly/go/internal/control"
 	"github.com/jsdvjx/ccfly/go/internal/mesh"
 	"github.com/jsdvjx/ccfly/go/internal/profile"
@@ -635,7 +636,7 @@ func loginDo(ctx context.Context, t mesh.LoginTarget, method, path string, q url
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudhttp.Client.Do(req)
 	if err != nil {
 		return err
 	}

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jsdvjx/ccfly/go/internal/cloudhttp"
 	"github.com/jsdvjx/ccfly/go/internal/control"
 )
 
@@ -115,7 +116,7 @@ func pushSummaries(ctx context.Context, st *State, digests []control.SessionDige
 		return nil, false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudhttp.Client.Do(req)
 	if err != nil {
 		log.Printf("ccfly: sync push failed: %v", err)
 		return nil, false
@@ -176,7 +177,7 @@ func putBlob(ctx context.Context, st *State, sid string, from int64, data []byte
 		return 0, false
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := cloudhttp.Client.Do(req)
 	if err != nil {
 		log.Printf("ccfly: sync blob failed: %v", err)
 		return 0, false
