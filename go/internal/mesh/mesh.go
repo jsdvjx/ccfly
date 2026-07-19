@@ -592,6 +592,7 @@ func refreshConfig(ctx context.Context, st *State) {
 	if c.ProxyCA != st.ProxyCA {
 		st.ProxyCA, changed = c.ProxyCA, true
 	}
+	refreshDomainListAndRearm() // OSS 清单独立收敛；已有 arm 时立即重装，新连接时只预热缓存
 	if !sameSNI(st.SNI, c.SNI) {
 		st.SNI, changed = c.SNI, true
 	}
@@ -616,6 +617,7 @@ func runSNIPolicyRefresher(ctx context.Context, st *State) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			refreshDomainListAndRearm() // OSS 更新不依赖 cloud device-config 请求是否成功
 			c, err := fetchDeviceConfig(ctx, st)
 			if err != nil {
 				continue // full reconnect refresh logs failures; avoid periodic log spam
