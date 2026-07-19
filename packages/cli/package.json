@@ -1,6 +1,6 @@
 {
   "name": "ccfly",
-  "version": "0.15.5",
+  "version": "0.16.0",
   "description": "Local Go control service for Claude Code sessions (reads ~/.claude jsonl + drives tmux).",
   "license": "MIT",
   "type": "commonjs",

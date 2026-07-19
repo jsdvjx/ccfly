@@ -1,5 +1,11 @@
 # ccfly
 
+## 0.16.0
+
+### Minor Changes
+
+- Add ordered mesh endpoint failover with independent TLS identity URLs and TCP dial addresses. Environment-configured entries are tried first while the cloud-provided mesh URL remains the automatic compatibility fallback.
+
 ## 0.15.5
 
 ### Patch Changes
