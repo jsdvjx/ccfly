@@ -119,14 +119,16 @@ type sniProbe struct {
 // status 组装快照;armed 时附带探测(fresh=同步刷新,否则读调度器缓存)。
 func (m *sniManager) status(fresh bool) sniSnapshot {
 	m.mu.Lock()
+	dnsBound := m.dnsSvc != nil && m.dnsSvc.Running()
 	s := sniSnapshot{
 		Platform:  runtime.GOOS,
 		OverlayUp: activeNet.Load() != nil,
-		DNSBound:  m.dns != nil,
+		DNSBound:  dnsBound,
 		Listeners: len(m.listeners),
 	}
 	s.ResolverPointed = m.resolvOn
-	if m.helperConn != nil {
+	helperMode := m.helperConn != nil
+	if helperMode {
 		// macOS helper owns the real v4/v6 :443 fronts, CoreDNS and resolver while
 		// the agent owns one unprivileged relay listener.  Report production
 		// ingress state, not the implementation-detail relay count.
@@ -141,14 +143,27 @@ func (m *sniManager) status(fresh bool) sniSnapshot {
 		s.Account = m.cur.Account
 		exit = m.cur.Exit
 		s.Exit = net.JoinHostPort(exit.Host, strconv.Itoa(exit.Port))
-		s.Intercept = effectiveIntercept(m.cur)
-		s.ListVersion = domainListVersion()
+		switch {
+		case m.dnsSvc != nil: // linux/windows:进程内策略服务即权威
+			s.Intercept = m.dnsSvc.Domains()
+			s.ListVersion = m.dnsSvc.Version()
+		case helperMode: // darwin:权威在 helper;resolver 文件即实际生效清单
+			s.Intercept = managedResolverDomains()
+			s.ListVersion = m.helperVersion
+		}
 	}
 	if !m.since.IsZero() {
 		s.Since = m.since.Unix()
 	}
 	m.mu.Unlock()
 
+	if s.Armed && helperMode {
+		// darwin:配置权威在 helper 的 dnsPolicyService;agent 只做版本观测(HEAD 取 ETag),
+		// 让上报的 list_version 跟上 helper 的热重载。失败保留 arm 时的版本。
+		if v := observeDomainListVersion(); v != "" {
+			s.ListVersion = v
+		}
+	}
 	if s.Armed {
 		s.Probe = cachedProbe(exit, s.Account, fresh)
 	}

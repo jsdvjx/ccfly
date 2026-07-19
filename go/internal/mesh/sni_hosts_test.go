@@ -5,6 +5,12 @@ import (
 	"testing"
 )
 
+// hosts 方案已下线(三端统一 :53 DNS),这里只保留「旧版托管块剥离」的回归——卸载/重装时
+// 清理老版本残留仍依赖 stripCcflyHostsBlock(darwin restoreUnixHosts、restoreResolver 兼容清理)。
+
+// 手写的旧版块样例(不再保留渲染函数,剥离必须容忍任意旧文案)。
+const legacyHostsBlock = "# BEGIN ccfly-sni (managed by ccfly — 局部块，勿手改；卸载 ccfly 可删本块)\r\n127.0.0.1 api.anthropic.com\r\n::1 api.anthropic.com\r\n127.0.0.1 claude.ai\r\n::1 claude.ai\r\n# END ccfly-sni\r\n"
+
 func TestStripCcflyHostsBlock_NoBlock(t *testing.T) {
 	in := "127.0.0.1 localhost\r\n10.0.0.5 myserver\r\n"
 	if got := stripCcflyHostsBlock(in); got != in {
@@ -12,68 +18,27 @@ func TestStripCcflyHostsBlock_NoBlock(t *testing.T) {
 	}
 }
 
-func TestApplyAndStrip_PreservesUserEntries(t *testing.T) {
+func TestStripCcflyHostsBlock_RemovesLegacyBlockKeepsUserEntries(t *testing.T) {
 	user := "# my hosts\r\n127.0.0.1 localhost\r\n192.168.1.10 nas.local\r\n"
-	applied := applyCcflyHostsBlock(user, []string{"api.anthropic.com", "claude.ai"})
-
-	// user lines must survive verbatim
-	for _, must := range []string{"127.0.0.1 localhost", "192.168.1.10 nas.local", "# my hosts"} {
-		if !strings.Contains(applied, must) {
-			t.Fatalf("user entry %q lost after apply:\n%s", must, applied)
-		}
-	}
-	// pinned hosts present, both v4 and v6
-	for _, must := range []string{"127.0.0.1 api.anthropic.com", "::1 api.anthropic.com", "127.0.0.1 claude.ai", "::1 claude.ai"} {
-		if !strings.Contains(applied, must) {
-			t.Fatalf("pinned entry %q missing:\n%s", must, applied)
-		}
-	}
-	if !strings.Contains(applied, hostsBeginPrefix) || !strings.Contains(applied, hostsEndPrefix) {
-		t.Fatalf("markers missing:\n%s", applied)
-	}
-
-	// stripping returns to (trailing-trimmed) user content — no ccfly residue
-	stripped := stripCcflyHostsBlock(applied)
+	stripped := stripCcflyHostsBlock(user + legacyHostsBlock)
 	if strings.Contains(stripped, "anthropic") || strings.Contains(stripped, hostsBeginPrefix) {
 		t.Fatalf("ccfly block not fully removed:\n%s", stripped)
 	}
-	for _, must := range []string{"127.0.0.1 localhost", "192.168.1.10 nas.local"} {
+	for _, must := range []string{"127.0.0.1 localhost", "192.168.1.10 nas.local", "# my hosts"} {
 		if !strings.Contains(stripped, must) {
 			t.Fatalf("user entry %q lost after strip:\n%s", must, stripped)
 		}
 	}
 }
 
-func TestApply_Idempotent(t *testing.T) {
-	user := "127.0.0.1 localhost\r\n"
-	once := applyCcflyHostsBlock(user, sniPinnedHosts)
-	twice := applyCcflyHostsBlock(once, sniPinnedHosts)
-	if once != twice {
-		t.Fatalf("apply not idempotent:\nonce=%q\ntwice=%q", once, twice)
+func TestStripCcflyHostsBlock_LFVariant(t *testing.T) {
+	user := "##\n# Host Database\n##\n127.0.0.1\tlocalhost\n"
+	lfBlock := strings.ReplaceAll(legacyHostsBlock, "\r\n", "\n")
+	stripped := strings.TrimRight(stripCcflyHostsBlock(user+lfBlock), "\n")
+	if strings.Contains(stripped, "anthropic") || strings.Contains(stripped, hostsBeginPrefix) {
+		t.Fatalf("ccfly residue after LF strip:\n%s", stripped)
 	}
-	// exactly one managed block after re-apply
-	if n := strings.Count(twice, hostsBeginPrefix); n != 1 {
-		t.Fatalf("expected exactly 1 ccfly block, got %d:\n%s", n, twice)
-	}
-}
-
-func TestApply_EmptyExisting(t *testing.T) {
-	out := applyCcflyHostsBlock("", []string{"api.anthropic.com"})
-	if !strings.HasPrefix(out, hostsBeginPrefix) {
-		t.Fatalf("empty-existing should yield just the block, got:\n%s", out)
-	}
-	if !strings.Contains(out, "::1 api.anthropic.com") {
-		t.Fatalf("v6 pin missing:\n%s", out)
-	}
-}
-
-func TestPinnedHostsAreExactHostnames(t *testing.T) {
-	if len(sniPinnedHosts) == 0 {
-		t.Fatal("sniPinnedHosts must not be empty")
-	}
-	for _, h := range sniPinnedHosts {
-		if strings.ContainsAny(h, "*/ ") || !strings.Contains(h, ".") {
-			t.Fatalf("pinned host %q must be an exact hostname (no wildcard/space)", h)
-		}
+	if stripped != strings.TrimRight(user, "\n") {
+		t.Fatalf("LF strip did not restore user content:\nwant %q\ngot  %q", strings.TrimRight(user, "\n"), stripped)
 	}
 }

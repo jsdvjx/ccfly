@@ -4,7 +4,6 @@ package mesh
 
 import (
 	"net"
-	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -37,46 +36,6 @@ func TestEmbeddedCoreDNSInterceptsAndForwards(t *testing.T) {
 	q.SetQuestion("api.anthropic.com.", dns.TypeA)
 	if _, _, err := c.Exchange(q, addr); err == nil {
 		t.Fatal("CoreDNS still answered after Stop")
-	}
-}
-
-func TestDomainListPublishesInterceptAndUpstreamsAtomically(t *testing.T) {
-	old := domainListCache
-	domainListCache = &sniDomainList{}
-	defer func() { domainListCache = old }()
-
-	body := []byte(`{
-        "pinned_hosts":["API.Anthropic.com","api.anthropic.com"],
-        "intercept":["Anthropic.com","claude.ai"],
-        "upstream":["223.5.5.5","[2001:db8::53]:5353"]
-    }`)
-	if !updateDomainListCache(body, "etag-one") {
-		t.Fatal("first valid OSS policy should publish as changed")
-	}
-	cfg := &SNIConfig{Intercept: []string{"fallback.test"}, Upstream: []string{"1.1.1.1"}}
-	if got, want := effectiveIntercept(cfg), []string{"anthropic.com", "claude.ai"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("intercept=%v want=%v", got, want)
-	}
-	if got, want := effectiveUpstreams(cfg), []string{"223.5.5.5:53", "[2001:db8::53]:5353"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("upstreams=%v want=%v", got, want)
-	}
-	if got := domainListVersion(); got != "etag-one" {
-		t.Fatalf("etag=%q", got)
-	}
-
-	// A new ETag with identical runtime policy updates observability without a
-	// disruptive re-arm. A malformed document must preserve that good state.
-	if updateDomainListCache(body, "etag-two") {
-		t.Fatal("identical policy should not request a re-arm")
-	}
-	if got := domainListVersion(); got != "etag-two" {
-		t.Fatalf("new ETag not published: %q", got)
-	}
-	if updateDomainListCache([]byte(`{"pinned_hosts":[],"intercept":[],"upstream":[]}`), "bad") {
-		t.Fatal("invalid policy should not publish")
-	}
-	if got := domainListVersion(); got != "etag-two" {
-		t.Fatalf("invalid policy replaced last good state: %q", got)
 	}
 }
 

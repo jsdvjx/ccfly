@@ -66,9 +66,10 @@ func freeDNSPort(t *testing.T) int {
 	return port
 }
 
-// startTestHelper 起真实 helper 服务端,但测试自持 listener → cleanup 关它即停 serve 循环,
-// 不像 RunSNIHelper 那样永久 Accept 泄漏 goroutine(泄漏的 disarm 会踩后续测试的 hosts 文件)。
-func startTestHelper(t *testing.T) {
+// startTestHelper 起真实 helper 服务端(含常驻 DNS 策略服务,fetchURL 指向不可达地址→兜底清单),
+// 但测试自持 listener → cleanup 关它即停 serve 循环,不像 RunSNIHelper 那样永久 Accept 泄漏 goroutine
+// (泄漏的 disarm 会踩后续测试的 hosts 文件)。返回 helper 句柄(测试可经 h.dnsSvc 注入新策略)。
+func startTestHelper(t *testing.T) *sniHelper {
 	t.Helper()
 	_ = restoreResolver()
 	_ = os.Remove(sniHelperSocket)
@@ -78,6 +79,13 @@ func startTestHelper(t *testing.T) {
 	}
 	_ = os.Chmod(sniHelperSocket, 0o666)
 	h := &sniHelper{}
+	svc := newDNSPolicyService(sniCoreDNSListenIP, sniCoreDNSPort)
+	svc.fetchURL = "http://127.0.0.1:1/unreachable" // 测试不碰真 OSS;兜底清单(含 anthropic.com/claude.ai)
+	svc.onChange = func(domains []string) { h.rewriteResolver(domains) }
+	if err := svc.start(); err != nil {
+		t.Fatalf("start dns policy service: %v", err)
+	}
+	h.dnsSvc = svc
 	serveDone := make(chan struct{})
 	go func() {
 		defer close(serveDone)
@@ -87,17 +95,19 @@ func startTestHelper(t *testing.T) {
 		ln.Close()
 		<-serveDone
 		h.connWG.Wait()
+		svc.Stop()
 	})
+	return h
 }
 
-// armClient 模拟 agent 侧线格:连 socket、发 arm、读应答。返回保持打开的控制连接(关它=撤租约)。
-func armClient(t *testing.T, relayPort int, domains, upstreams []string) (net.Conn, sniArmResp) {
+// armClient 模拟 agent 侧线格:连 socket、发 arm(只带 relay_port)、读应答。返回保持打开的控制连接(关它=撤租约)。
+func armClient(t *testing.T, relayPort int) (net.Conn, sniArmResp) {
 	t.Helper()
 	c, err := net.Dial("unix", sniHelperSocket)
 	if err != nil {
 		t.Fatalf("dial helper: %v", err)
 	}
-	if err := writeJSONLine(c, sniArmReq{Cmd: "arm", RelayPort: relayPort, Domains: domains, Upstreams: upstreams}); err != nil {
+	if err := writeJSONLine(c, sniArmReq{Cmd: "arm", RelayPort: relayPort}); err != nil {
 		t.Fatalf("write arm: %v", err)
 	}
 	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -153,13 +163,13 @@ func indexOf(hay, needle string) int {
 	return -1
 }
 
-// 端到端:arm → CoreDNS + scoped resolver;关控制连接 → resolver 删除且 DNS 停止。
+// 端到端:arm → resolver 按策略服务清单写入;关控制连接 → resolver 删除(CoreDNS 属常驻服务,不随租约停)。
 func TestHelperArmStartsCoreDNSAndDisarmRestores(t *testing.T) {
 	resolverPath := withHelperTestEnv(t)
 	startTestHelper(t)
 	echoPort := startEchoServer(t)
 
-	ctrl, resp := armClient(t, echoPort, []string{"anthropic.com", "claude.ai"}, defaultSNIUpstreams)
+	ctrl, resp := armClient(t, echoPort)
 	defer ctrl.Close()
 	if !resp.OK {
 		t.Fatalf("arm not ok: %+v", resp)
@@ -177,16 +187,13 @@ func TestHelperArmStartsCoreDNSAndDisarmRestores(t *testing.T) {
 		t.Fatalf("CoreDNS synthesized %v, want both loopback families", got)
 	}
 
-	// 关控制连接 = 撤租约。
+	// 关控制连接 = 撤租约:resolver 删除;CoreDNS 属常驻 dnsPolicyService,撤租约后仍在(与生产一致)。
 	ctrl.Close()
 	if !waitFor(2*time.Second, func() bool {
 		_, err := os.Stat(resolverFile)
 		return os.IsNotExist(err)
 	}) {
 		t.Fatal("resolver file remained after disarm")
-	}
-	if _, err := lookupViaCoreDNS(helperDNSProbeName); err == nil {
-		t.Fatal("CoreDNS still answered after lease ended")
 	}
 }
 
@@ -229,7 +236,7 @@ func TestHelperSplicesFrontToRelay(t *testing.T) {
 	front.Close() // 立刻释放,让 helper arm 时重新绑同一端口
 	sniHelperFront = []string{frontAddr}
 
-	ctrl, resp := armClient(t, echoPort, []string{"anthropic.com"}, defaultSNIUpstreams)
+	ctrl, resp := armClient(t, echoPort)
 	if !resp.OK {
 		t.Fatalf("arm not ok: %+v", resp)
 	}
@@ -269,12 +276,12 @@ func TestHelperLeaseSupersedeKeepsNewResolver(t *testing.T) {
 	startTestHelper(t)
 	echoPort := startEchoServer(t)
 
-	old, r1 := armClient(t, echoPort, []string{"anthropic.com"}, defaultSNIUpstreams)
+	old, r1 := armClient(t, echoPort)
 	if !r1.OK {
 		t.Fatalf("first arm not ok: %+v", r1)
 	}
-	// 第二次合法 arm 顶掉第一次。
-	newer, r2 := armClient(t, echoPort, []string{"claude.ai"}, defaultSNIUpstreams)
+	// 第二次合法 arm 顶掉第一次(清单同源,断言 claude.ai 在兜底清单内)。
+	newer, r2 := armClient(t, echoPort)
 	if !r2.OK {
 		t.Fatalf("second arm not ok: %+v", r2)
 	}
@@ -292,25 +299,64 @@ func TestHelperLeaseSupersedeKeepsNewResolver(t *testing.T) {
 	}
 }
 
-func TestHelperRejectsMalformedDNSConfigAndPrivilegedRelay(t *testing.T) {
+func TestHelperRejectsPrivilegedRelay(t *testing.T) {
 	withHelperTestEnv(t)
 	startTestHelper(t)
 
-	// 信任点=OSS,helper 不判厂商，但拒绝非法域名和非 IP 上游。
-	c, resp := armClient(t, 8080, []string{"not a valid host"}, defaultSNIUpstreams)
+	// 域名/上游校验已随「策略由 helper 自持」移除;arm 请求只校验 relay 端口范围。
+	c, resp := armClient(t, 443)
 	c.Close()
 	if resp.OK {
-		t.Fatal("root helper accepted a malformed domain")
+		t.Fatal("root helper accepted a privileged relay port")
 	}
-	c, resp = armClient(t, 8080, []string{"anthropic.com"}, []string{"dns.example.com"})
-	c.Close()
-	if resp.OK {
-		t.Fatal("root helper accepted a hostname upstream")
+}
+
+// 策略热更新:dnsPolicyService 发布新清单并 reload → OnChange 重写 resolver(新增域补齐、移除域删文件),
+// CoreDNS 应答随之变化;arm 应答携带当前清单版本。
+func TestHelperPolicyHotReloadRewritesResolver(t *testing.T) {
+	resolverPath := withHelperTestEnv(t)
+	h := startTestHelper(t)
+	echoPort := startEchoServer(t)
+
+	ctrl, resp := armClient(t, echoPort)
+	defer ctrl.Close()
+	if !resp.OK {
+		t.Fatalf("arm not ok: %+v", resp)
 	}
-	c, resp = armClient(t, 443, []string{"anthropic.com"}, defaultSNIUpstreams)
-	c.Close()
-	if resp.OK {
-		t.Fatal("root helper accepted a privileged/recursive relay port")
+	// 兜底清单从未拉过 OSS → arm 时无版本。
+	if resp.Version != "" {
+		t.Fatalf("fallback policy should carry no version, got %q", resp.Version)
+	}
+	if _, err := os.Stat(filepath.Join(resolverPath, "example.test")); !os.IsNotExist(err) {
+		t.Fatal("example.test resolver should not exist before policy change")
+	}
+
+	// 模拟 OSS 新清单(加 example.test、去掉 statsig.com)并热重载。
+	if !h.dnsSvc.publish([]byte(`{"intercept":["anthropic.com","claude.ai","claude.com","example.test"],"upstream":["223.5.5.5"]}`), "etag-hot1") {
+		t.Fatal("policy publish should report change")
+	}
+	h.dnsSvc.reload()
+
+	// resolver 被重写:新域补齐,被移除的域文件删除,版本更新。
+	if !fileHas(t, filepath.Join(resolverPath, "example.test"), resolverMarker) {
+		t.Fatal("example.test resolver missing after hot reload")
+	}
+	if _, err := os.Stat(filepath.Join(resolverPath, "statsig.com")); !os.IsNotExist(err) {
+		t.Fatal("statsig.com resolver should be removed after policy shrink")
+	}
+	if got := h.dnsSvc.Version(); got != "etag-hot1" {
+		t.Fatalf("version=%q", got)
+	}
+	// CoreDNS 已重载:新域被拦截。
+	got, err := lookupViaCoreDNS("a.example.test")
+	if err != nil || !containsString(got, "127.0.0.1") {
+		t.Fatalf("example.test not intercepted after reload: %v %v", got, err)
+	}
+	// 新 arm 的应答应带当前版本。
+	c2, r2 := armClient(t, echoPort)
+	defer c2.Close()
+	if !r2.OK || r2.Version != "etag-hot1" {
+		t.Fatalf("second arm resp=%+v", r2)
 	}
 }
 
@@ -327,7 +373,7 @@ func TestHelperResolverConflictRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c, resp := armClient(t, echoPort, []string{"anthropic.com"}, defaultSNIUpstreams)
+	c, resp := armClient(t, echoPort)
 	c.Close()
 	if resp.OK {
 		t.Fatal("helper overwrote a user-owned scoped resolver")
@@ -335,9 +381,6 @@ func TestHelperResolverConflictRollsBack(t *testing.T) {
 	b, err := os.ReadFile(path)
 	if err != nil || string(b) != original {
 		t.Fatalf("user resolver changed during rollback: %q, %v", b, err)
-	}
-	if _, err := lookupViaCoreDNS(helperDNSProbeName); err == nil {
-		t.Fatal("CoreDNS remained running after resolver conflict")
 	}
 }
 

@@ -43,10 +43,10 @@ func TestSNIStatusArmedSnapshot(t *testing.T) {
 	m := &sniManager{
 		cur: &SNIConfig{
 			Enabled: true, Account: "a@x.com",
-			Exit:      SNIExit{Host: "100.64.0.16", Port: 443},
-			Intercept: []string{"anthropic.com", "claude.ai"},
+			Exit: SNIExit{Host: "100.64.0.16", Port: 443},
 		},
-		listeners: make([]net.Listener, 2), // 两个 nil 元素:仅测 len(=v4+v6)
+		dnsSvc:    newDNSPolicyService("127.0.0.1", 15353), // 兜底清单即权威(不起服务,仅读配置面)
+		listeners: make([]net.Listener, 2),                 // 两个 nil 元素:仅测 len(=v4+v6)
 		resolvOn:  true,
 		since:     since,
 	}
@@ -54,7 +54,7 @@ func TestSNIStatusArmedSnapshot(t *testing.T) {
 	if !s.Armed || s.Account != "a@x.com" || s.Exit != "100.64.0.16:443" {
 		t.Fatalf("armed 派生字段不对:%+v", s)
 	}
-	if len(s.Intercept) != 2 || s.Intercept[0] != "anthropic.com" {
+	if len(s.Intercept) == 0 || s.Intercept[0] != "anthropic.com" {
 		t.Fatalf("intercept 不对:%+v", s.Intercept)
 	}
 	if s.Listeners != 2 || !s.ResolverPointed {

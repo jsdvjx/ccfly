@@ -109,3 +109,24 @@ func isManagedResolver(content []byte) bool {
 	firstLine, _, _ := strings.Cut(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n")
 	return firstLine == resolverMarker
 }
+
+// managedResolverDomains 返回 /etc/resolver 下现役 ccfly 托管文件名(=实际生效的拦截 apex 清单)。
+// darwin 上权威配置在 root helper 自持的 dnsPolicyService,agent 侧以此作真实清单观测。读取失败=空。
+func managedResolverDomains() []string {
+	entries, err := os.ReadDir(resolverDir)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(resolverDir, e.Name()))
+		if err != nil || !isManagedResolver(b) {
+			continue
+		}
+		out = append(out, e.Name())
+	}
+	return out
+}
