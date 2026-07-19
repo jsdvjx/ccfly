@@ -1,101 +1,154 @@
 package mesh
 
-// sni_test.go — 客户端 SNI arm 纯逻辑回归:DNS 问题解析、intercept 匹配、loopback 应答合成、sameSNI 判等。
-// (DNS/:443 监听 + resolv.conf 需 root,不在单测内起;此处只验协议层逻辑正确。)
+// sni_test.go — CoreDNS 数据面与 SNI 配置判等回归。
 
 import (
-	"encoding/binary"
+	"net"
+	"reflect"
+	"strconv"
 	"testing"
+	"time"
+
+	"github.com/miekg/dns"
 )
 
-// buildQuery 构造一个最小 DNS 查询(单问题,给定 qname + qtype)。
-func buildQuery(name string, qtype uint16) []byte {
-	msg := make([]byte, 12)
-	binary.BigEndian.PutUint16(msg[0:2], 0x1234) // id
-	binary.BigEndian.PutUint16(msg[4:6], 1)      // QDCOUNT=1
-	for _, label := range splitLabels(name) {
-		msg = append(msg, byte(len(label)))
-		msg = append(msg, []byte(label)...)
+func TestEmbeddedCoreDNSInterceptsAndForwards(t *testing.T) {
+	upstreamPort, stopUpstream := startTestDNSUpstream(t)
+	defer stopUpstream()
+	listenPort := freeCoreDNSTestPort(t)
+	service, err := startCoreDNS("127.0.0.1", listenPort, []string{"anthropic.com", "claude.ai"},
+		[]string{net.JoinHostPort("127.0.0.1", strconv.Itoa(upstreamPort))})
+	if err != nil {
+		t.Fatal(err)
 	}
-	msg = append(msg, 0)                                    // root
-	msg = append(msg, byte(qtype>>8), byte(qtype), 0, 0x01) // QTYPE + QCLASS IN
-	return msg
+	defer service.Stop()
+
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(listenPort))
+	assertDNSAnswer(t, "udp", addr, "api.anthropic.com.", dns.TypeA, "127.0.0.1")
+	assertDNSAnswer(t, "tcp", addr, "a.b.claude.ai.", dns.TypeAAAA, "::1")
+	assertDNSAnswer(t, "udp", addr, "anthropic.com.evil.test.", dns.TypeA, "203.0.113.7")
+	assertDNSAnswer(t, "tcp", addr, "example.net.", dns.TypeA, "203.0.113.7")
+
+	if err := service.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	c := &dns.Client{Net: "udp", Timeout: 200 * time.Millisecond}
+	q := new(dns.Msg)
+	q.SetQuestion("api.anthropic.com.", dns.TypeA)
+	if _, _, err := c.Exchange(q, addr); err == nil {
+		t.Fatal("CoreDNS still answered after Stop")
+	}
 }
 
-func splitLabels(name string) []string {
-	out := []string{}
-	cur := ""
-	for _, r := range name {
-		if r == '.' {
-			out = append(out, cur)
-			cur = ""
-		} else {
-			cur += string(r)
+func TestDomainListPublishesInterceptAndUpstreamsAtomically(t *testing.T) {
+	old := domainListCache
+	domainListCache = &sniDomainList{}
+	defer func() { domainListCache = old }()
+
+	body := []byte(`{
+        "pinned_hosts":["API.Anthropic.com","api.anthropic.com"],
+        "intercept":["Anthropic.com","claude.ai"],
+        "upstream":["223.5.5.5","[2001:db8::53]:5353"]
+    }`)
+	if !updateDomainListCache(body, "etag-one") {
+		t.Fatal("first valid OSS policy should publish as changed")
+	}
+	cfg := &SNIConfig{Intercept: []string{"fallback.test"}, Upstream: []string{"1.1.1.1"}}
+	if got, want := effectiveIntercept(cfg), []string{"anthropic.com", "claude.ai"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("intercept=%v want=%v", got, want)
+	}
+	if got, want := effectiveUpstreams(cfg), []string{"223.5.5.5:53", "[2001:db8::53]:5353"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("upstreams=%v want=%v", got, want)
+	}
+	if got := domainListVersion(); got != "etag-one" {
+		t.Fatalf("etag=%q", got)
+	}
+
+	// A new ETag with identical runtime policy updates observability without a
+	// disruptive re-arm. A malformed document must preserve that good state.
+	if updateDomainListCache(body, "etag-two") {
+		t.Fatal("identical policy should not request a re-arm")
+	}
+	if got := domainListVersion(); got != "etag-two" {
+		t.Fatalf("new ETag not published: %q", got)
+	}
+	if updateDomainListCache([]byte(`{"pinned_hosts":[],"intercept":[],"upstream":[]}`), "bad") {
+		t.Fatal("invalid policy should not publish")
+	}
+	if got := domainListVersion(); got != "etag-two" {
+		t.Fatalf("invalid policy replaced last good state: %q", got)
+	}
+}
+
+func startTestDNSUpstream(t *testing.T) (int, func()) {
+	t.Helper()
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := tcp.Addr().(*net.TCPAddr).Port
+	udp, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		tcp.Close()
+		t.Fatal(err)
+	}
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, req *dns.Msg) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		if len(req.Question) > 0 && req.Question[0].Qtype == dns.TypeA {
+			resp.Answer = append(resp.Answer, &dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 30}, A: net.ParseIP("203.0.113.7")})
 		}
-	}
-	if cur != "" {
-		out = append(out, cur)
-	}
-	return out
-}
-
-func TestParseDNSQuestion(t *testing.T) {
-	q := buildQuery("api.anthropic.com", 1)
-	name, qtype, ok := parseDNSQuestion(q)
-	if !ok || name != "api.anthropic.com" || qtype != 1 {
-		t.Fatalf("解析应得 api.anthropic.com/A,得 %q/%d ok=%v", name, qtype, ok)
-	}
-	// AAAA + 大写归一化。
-	q2 := buildQuery("Console.Anthropic.COM", 28)
-	name2, qtype2, _ := parseDNSQuestion(q2)
-	if name2 != "console.anthropic.com" || qtype2 != 28 {
-		t.Fatalf("应小写化并识别 AAAA,得 %q/%d", name2, qtype2)
-	}
-	// 截断/畸形 → ok=false。
-	if _, _, ok := parseDNSQuestion([]byte{0, 0, 0}); ok {
-		t.Fatal("畸形查询应 ok=false")
+		_ = w.WriteMsg(resp)
+	})
+	udpServer := &dns.Server{PacketConn: udp, Handler: mux}
+	tcpServer := &dns.Server{Listener: tcp, Handler: mux}
+	go func() { _ = udpServer.ActivateAndServe() }()
+	go func() { _ = tcpServer.ActivateAndServe() }()
+	return port, func() {
+		_ = udpServer.Shutdown()
+		_ = tcpServer.Shutdown()
 	}
 }
 
-func TestMatchesIntercept(t *testing.T) {
-	ic := []string{"anthropic.com", "claude.ai", "statsig.com"}
-	for _, name := range []string{"anthropic.com", "api.anthropic.com", "a.b.c.anthropic.com", "claude.ai", "x.statsig.com"} {
-		if !matchesIntercept(name, ic) {
-			t.Fatalf("%q 应命中 intercept", name)
-		}
+func freeCoreDNSTestPort(t *testing.T) int {
+	t.Helper()
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range []string{"anthropic.com.evil.com", "notanthropic.com", "google.com", "claude.ai.co"} {
-		if matchesIntercept(name, ic) {
-			t.Fatalf("%q 不应命中 intercept", name)
-		}
+	port := tcp.Addr().(*net.TCPAddr).Port
+	udp, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		tcp.Close()
+		t.Fatal(err)
 	}
+	tcp.Close()
+	udp.Close()
+	return port
 }
 
-func TestBuildLoopbackAnswer(t *testing.T) {
-	// A → 127.0.0.1,响应可解析、ANCOUNT=1、QR 置位、rdata 正确。
-	q := buildQuery("api.anthropic.com", 1)
-	resp := buildLoopbackAnswer(q, 1)
-	if resp == nil {
-		t.Fatal("A 应合成应答")
+func assertDNSAnswer(t *testing.T, network, server, name string, qtype uint16, want string) {
+	t.Helper()
+	q := new(dns.Msg)
+	q.SetQuestion(name, qtype)
+	c := &dns.Client{Net: network, Timeout: 2 * time.Second}
+	resp, _, err := c.Exchange(q, server)
+	if err != nil {
+		t.Fatalf("%s %s/%d: %v", network, name, qtype, err)
 	}
-	if resp[2]&0x80 == 0 {
-		t.Fatal("QR 位应置 1")
+	if len(resp.Answer) != 1 {
+		t.Fatalf("%s %s/%d: answers=%v", network, name, qtype, resp.Answer)
 	}
-	if binary.BigEndian.Uint16(resp[6:8]) != 1 {
-		t.Fatal("ANCOUNT 应为 1")
+	var got string
+	switch rr := resp.Answer[0].(type) {
+	case *dns.A:
+		got = rr.A.String()
+	case *dns.AAAA:
+		got = rr.AAAA.String()
 	}
-	// 应答尾部 rdata 应为 127.0.0.1。
-	if n := len(resp); n < 4 || resp[n-4] != 127 || resp[n-1] != 1 {
-		t.Fatalf("A rdata 应为 127.0.0.1,得尾 %v", resp[len(resp)-4:])
-	}
-	// 问题段仍能被解析回来(应答复用了原 header+question)。
-	if name, qtype, ok := parseDNSQuestion(resp); !ok || name != "api.anthropic.com" || qtype != 1 {
-		t.Fatalf("应答应保留原问题,得 %q/%d ok=%v", name, qtype, ok)
-	}
-	// AAAA → ::1(16 字节,末位 1)。
-	respv6 := buildLoopbackAnswer(buildQuery("api.anthropic.com", 28), 28)
-	if n := len(respv6); n < 16 || respv6[n-1] != 1 || respv6[n-16] != 0 {
-		t.Fatalf("AAAA rdata 应为 ::1")
+	if got != want {
+		t.Fatalf("%s %s/%d: got %q want %q", network, name, qtype, got, want)
 	}
 }
 

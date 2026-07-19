@@ -24,6 +24,46 @@ var sniPinnedHosts = []string{
 	"statsig.anthropic.com", // 功能开关（沿用既有 statsig 拦截，Anthropic 自有子域）
 }
 
+// 信任点 = OSS 本身：清单对象 public-read 但仅 agent 持 AK 可写，HTTPS 传输防篡改。设备信 OSS 内容，
+// 不再按厂商白名单二次过滤——去掉后加任何厂商域名(OpenAI 等)都纯 OSS 热更、不发版。仅保留基本合法性
+// sanity(防 OSS 万一返回乱码/通配/超长主机名，这不是信任判断)。sniPinnedHosts 是 OSS 读不到时的编译期兜底。
+
+// isValidSNIHost 只校验是不是一个合法 DNS 主机名(小写字母数字/点/连字符、含点、长度合理)，不判厂商。
+func isValidSNIHost(h string) bool {
+	h = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+	if len(h) < 3 || len(h) > 253 || !strings.Contains(h, ".") {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+				return false
+			}
+		}
+		if label == "-" {
+			return false
+		}
+	}
+	return true
+}
+
+// filterAllowedHosts 归一化 + 去重 + 丢掉不合法主机名(sanity，非厂商过滤)。
+func filterAllowedHosts(hosts []string) []string {
+	out := make([]string, 0, len(hosts))
+	seen := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+		if isValidSNIHost(h) && !seen[h] {
+			seen[h] = true
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
 const (
 	// 完整起始标记行（写入用）。剥离用前缀匹配，故标记文案微调也不影响清理旧块。
 	hostsBeginLine   = "# BEGIN ccfly-sni (managed by ccfly — 局部块，勿手改；卸载 ccfly 可删本块)"

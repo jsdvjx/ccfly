@@ -7,22 +7,24 @@ package mesh
 // 且绑定了 SNI 账号的设备):有段 → 装并配置;无段 → 幂等卸载。由 runTunnel 经 applyMeshSNI 驱动。
 //
 // 三段:
-//   ① 内嵌极小 DNS(UDP 127.0.0.1:53):intercept 域(含子域)→ A=127.0.0.1 / AAAA=::1;其余原样转上游。
-//      —— 比外部 SmartDNS 轻(无需下载/装二进制),ccfly 本就是 Go 进程。
+//   ① 进程内 CoreDNS(TCP+UDP 127.0.0.1:53):intercept 域(含子域)→ A=127.0.0.1 / AAAA=::1;
+//      其余查询交给 OSS 配置的上游。
 //   ② 本地 :443 双栈 TCP(127.0.0.1 + [::1]):把连接经 overlay netstack 透传到 exit(账号 byway-sni),
 //      byway-sni peek SNI 后按设备源 IP 的池规则从账号 IP 出网。
 //   ③ 系统解析指向(pointResolver,三平台各异):Linux=/etc/resolv.conf 指向 127.0.0.1(备份原文件,
-//      真上游列为次级 nameserver 做 fail-open);macOS root helper 与 Windows 使用 hosts 托管块把
-//      精确主机名钉到 loopback(见 sni_hosts.go)。
+//      真上游列为次级 nameserver 做 fail-open);macOS root helper 写 scoped /etc/resolver;Windows
+//      使用 hosts 托管块把精确主机名钉到 loopback(见 sni_hosts.go)。
 //
 // 失败安全:任一组件起不来(非 root/非管理员无法 bind :53/:443 或写 hosts)→ 不改系统解析、不 brick,只 log。
 // 卸载:恢复 resolv.conf、停 DNS、关 :443。幂等(重复无段 = 保持卸载态)。
 
 import (
 	"context"
-	"encoding/binary"
+	"encoding/json"
+	"io"
 	"log"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -66,13 +68,14 @@ func sameSNI(a, b *SNIConfig) bool {
 
 type sniManager struct {
 	mu         sync.Mutex
-	cur        *SNIConfig     // 当前生效配置(nil=未装)
-	dnsConn    *net.UDPConn   // :53 UDP
-	listeners  []net.Listener // :443 v4 + v6(darwin helper 路径下=非特权 relay 监听)
-	resolvOn   bool           // 是否已改过 resolv.conf(卸载时才恢复)
-	helperConn net.Conn       // darwin only:到 root sni-helper 的控制连接(关它即撤 arm 租约→恢复 hosts/关 :443)
-	since      time.Time      // arm 成功起来的时刻(卸载清零);供 /sni-status 与上报
-	lastErr    string         // 最近一次 setup 失败原因(成功清空);解释非 root/非 Linux 静默 no-op
+	cur        *SNIConfig      // 当前生效配置(nil=未装)
+	dns        *coreDNSService // :53 CoreDNS(TCP+UDP);darwin helper 路径由 helper 自持
+	listeners  []net.Listener  // :443 v4 + v6(darwin helper 路径下=非特权 relay 监听)
+	resolvOn   bool            // 是否已改过 resolv.conf(卸载时才恢复)
+	helperConn net.Conn        // darwin only:关连接即撤 helper 租约→恢复 resolver/停 CoreDNS/关 :443
+	since      time.Time       // arm 成功起来的时刻(卸载清零);供 /sni-status 与上报
+	lastErr    string          // 最近一次 setup 失败原因(成功清空);解释非 root/非 Linux 静默 no-op
+	prober     *sniProber      // 检测调度器(armed 期间持有;teardown 停)
 }
 
 var sniMgr = &sniManager{}
@@ -114,13 +117,14 @@ func (m *sniManager) apply(cfg *SNIConfig) {
 	m.since = time.Now()
 	m.lastErr = ""
 	resetSNIProbe()
+	m.prober = startSNIProber(cfg.Exit, cfg.Account) // 配置生效后立即检测一次,其后 30s 周期+失败退避
 	log.Printf("ccfly: SNI arm up (account=%s exit=%s intercept=%v)", cfg.Account, net.JoinHostPort(cfg.Exit.Host, strconv.Itoa(cfg.Exit.Port)), cfg.Intercept)
 }
 
 // setupLocked 起 DNS + :443 + 把系统解析指向本地(三平台各异,见 pointResolver)。任一步失败返回 err,
 // 交调用方 teardown 回滚。
 func (m *sniManager) setupLocked(cfg *SNIConfig) error {
-	// macOS:agent 非 root 绑不了 :443、写不了 /etc/hosts → 拆双进程,特权部分交 root sni-helper 承接
+	// macOS:agent 非 root 绑不了 :443/:53、写不了 /etc/resolver → 特权部分交 root sni-helper 承接
 	// (overlay 拨号仍在本进程,见 snihelper_darwin.go)。其余平台走下面的单进程内联直绑。
 	if sniUsesHelper() {
 		return m.setupViaHelper(cfg)
@@ -134,22 +138,21 @@ func (m *sniManager) setupLocked(cfg *SNIConfig) error {
 		m.listeners = append(m.listeners, ln)
 		go m.serve443(ln, cfg.Exit)
 	}
-	intercept := normalizeDomains(cfg.Intercept)
-	upstream := firstUpstream(cfg.Upstream)
+	intercept := effectiveIntercept(cfg)
+	upstreams := effectiveUpstreams(cfg)
 	// ② DNS 127.0.0.1:53(需 root;resolv.conf/NRPT 的 nameserver 只接受 IP 不带端口 → 必须 :53)。
 	//    仅在需要「把系统解析导到本地 nameserver」的平台起(Linux resolv.conf / macOS /etc/resolver)。
 	//    Windows 走 hosts 直钉(见 sni_resolv_windows.go),不需要 :53 —— 也因此躲开 Clash 等占 :53 的代理。
 	if resolverNeedsLocalDNS() {
-		uc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53})
+		dns, err := startCoreDNS(sniCoreDNSListenIP, sniCoreDNSPort, intercept, upstreams)
 		if err != nil {
 			return err
 		}
-		m.dnsConn = uc
-		go m.serveDNS(uc, intercept, upstream)
+		m.dns = dns
 	}
 	// ③ 把系统解析指向本地:Linux=resolv.conf 全局(+次级上游 fail-open);macOS=/etc/resolver/<域> scoped;
 	//    Windows=hosts 精确主机名钉 loopback(无通配、逐主机名、局部块替换)。
-	if err := pointResolver(intercept, upstream); err != nil {
+	if err := pointResolver(intercept, upstreamIP(upstreams[0]), effectivePinnedHosts()); err != nil {
 		return err
 	}
 	m.resolvOn = true
@@ -162,9 +165,13 @@ func (m *sniManager) setupLocked(cfg *SNIConfig) error {
 // 域钉死在 loopback(无人监听 :443),整机 Claude 全断。幂等,未写过时是 no-op。
 func CleanupResolver() error { return restoreResolver() }
 
-// teardownLocked 恢复 resolv.conf、停 DNS、关 :443。幂等。
+// teardownLocked 恢复 resolver、停 CoreDNS、关 :443、停检测调度器。幂等。
 func (m *sniManager) teardownLocked() {
-	// darwin helper 路径:关控制连接即通知 root sni-helper 撤租约(恢复 /etc/hosts + 关它持的 :443)。
+	if m.prober != nil {
+		m.prober.Close() // 不等在途探测;迟到的结果被 probeGen 挡住
+		m.prober = nil
+	}
+	// darwin helper 路径:关控制连接即通知 root helper 撤租约(恢复 resolver + 停 CoreDNS + 关 :443)。
 	if m.helperConn != nil {
 		_ = m.helperConn.Close()
 		m.helperConn = nil
@@ -175,9 +182,11 @@ func (m *sniManager) teardownLocked() {
 		}
 		m.resolvOn = false
 	}
-	if m.dnsConn != nil {
-		_ = m.dnsConn.Close()
-		m.dnsConn = nil
+	if m.dns != nil {
+		if err := m.dns.Stop(); err != nil {
+			log.Printf("ccfly: stop CoreDNS: %v", err)
+		}
+		m.dns = nil
 	}
 	for _, ln := range m.listeners {
 		_ = ln.Close()
@@ -225,144 +234,163 @@ func relaySNIToExit(local net.Conn, exit SNIExit) {
 	relay(local, oc) // 复用 forward.go 的双向拷贝 + 5min 看门狗
 }
 
-// ── 内嵌极小 DNS(拦截 intercept 域到 loopback,其余转上游)──
+// ── 设备直接读 OSS 域名清单(内置 URL,与 cloud 解耦)──
+//
+// URL 编译内置;设备周期 GET → sanity 过滤 → 缓存。arm 用缓存的 pinned(Windows hosts)、intercept
+// 与 upstream(CoreDNS),拉不到退回 cloud/编译期兜底。拉到的 ETag 随 SNI 快照上报,cloud 只收集展示——各设备
+// ETag 相同即已收敛到同一版。cloud 不读 OSS、不下发清单、不当版本时钟(客户端再多也不给服务器加压)。
+// **信任点=OSS 本身**(public-read 但仅 agent 持 AK 可写 + HTTPS 传输防篡改),故加任何厂商域名(OpenAI
+// 等)都只改 OSS、不发版;设备只做合法性 sanity(见 filterAllowedHosts),不判厂商。
 
-func (m *sniManager) serveDNS(uc *net.UDPConn, intercept []string, upstream string) {
-	buf := make([]byte, 1500)
-	for {
-		n, src, err := uc.ReadFromUDP(buf)
-		if err != nil {
-			return // conn 关闭
-		}
-		q := make([]byte, n)
-		copy(q, buf[:n])
-		go handleDNSQuery(uc, src, q, intercept, upstream)
-	}
+const sniDomainListURL = "https://ccfly-domainlist.oss-cn-hongkong.aliyuncs.com/domainlist.json"
+
+// domainListClient 直连拉 OSS。① Proxy:nil——**不读环境 HTTP(S)_PROXY**(代理会 MITM/篡改;同
+// internal/cloudhttp)。② DisableCompression——**不带 Accept-Encoding: gzip**:OSS 对 gzip 传输会剥掉
+// ETag 响应头(Vary: Accept-Encoding),而我们靠 ETag 当版本号;清单才 1KB,不压缩无所谓。TLS 用系统 CA。
+var domainListClient = &http.Client{
+	Timeout:   8 * time.Second,
+	Transport: &http.Transport{Proxy: nil, DisableCompression: true},
 }
 
-// handleDNSQuery:命中 intercept 且 A/AAAA → 本地合成 loopback 应答;否则原样转上游再回。
-func handleDNSQuery(uc *net.UDPConn, src *net.UDPAddr, query []byte, intercept []string, upstream string) {
-	name, qtype, ok := parseDNSQuestion(query)
-	if ok && matchesIntercept(name, intercept) && (qtype == 1 || qtype == 28) {
-		if resp := buildLoopbackAnswer(query, qtype); resp != nil {
-			_, _ = uc.WriteToUDP(resp, src)
-			return
-		}
-	}
-	// 转发上游(原样字节;不解析响应)。
-	if resp := forwardDNS(query, upstream); resp != nil {
-		_, _ = uc.WriteToUDP(resp, src)
-	}
+type sniDomainList struct {
+	mu        sync.RWMutex
+	pinned    []string // pinned_hosts(Windows hosts 精确钉),已 sanity 过滤
+	intercept []string // CoreDNS 通配 apex,已 sanity 过滤
+	upstream  []string // CoreDNS 上游,规范化为 IP:port
+	etag      string   // 设备拉到的版本(内容 MD5);上报用
 }
 
-// parseDNSQuestion 从 DNS 查询里取第一个问题的 qname(小写、无尾点)与 qtype。
-func parseDNSQuestion(msg []byte) (name string, qtype uint16, ok bool) {
-	if len(msg) < 12 {
-		return "", 0, false
-	}
-	if qd := binary.BigEndian.Uint16(msg[4:6]); qd < 1 {
-		return "", 0, false
-	}
-	pos := 12
-	var labels []string
-	for {
-		if pos >= len(msg) {
-			return "", 0, false
-		}
-		l := int(msg[pos])
-		pos++
-		if l == 0 {
-			break
-		}
-		if l&0xc0 != 0 { // 问题段不应有压缩指针
-			return "", 0, false
-		}
-		if pos+l > len(msg) {
-			return "", 0, false
-		}
-		labels = append(labels, string(msg[pos:pos+l]))
-		pos += l
-	}
-	if pos+2 > len(msg) {
-		return "", 0, false
-	}
-	qtype = binary.BigEndian.Uint16(msg[pos : pos+2])
-	return strings.ToLower(strings.Join(labels, ".")), qtype, true
+var domainListCache = &sniDomainList{}
+
+func (c *sniDomainList) get() (pinned []string, etag string) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]string(nil), c.pinned...), c.etag
 }
 
-// matchesIntercept 判断 name 是否等于或是某 apex 域的子域。
-func matchesIntercept(name string, intercept []string) bool {
-	for _, d := range intercept {
-		if name == d || strings.HasSuffix(name, "."+d) {
-			return true
-		}
-	}
-	return false
+func (c *sniDomainList) getIntercept() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]string(nil), c.intercept...)
 }
 
-// buildLoopbackAnswer 就地把查询改造成一条 loopback 应答(A→127.0.0.1 / AAAA→::1)。
-func buildLoopbackAnswer(query []byte, qtype uint16) []byte {
-	if len(query) < 12 {
-		return nil
-	}
-	// 复制原查询(含 header + question)作为应答基。
-	resp := make([]byte, len(query))
-	copy(resp, query)
-	resp[2] |= 0x84                           // QR=1, AA=1
-	resp[3] = 0x80                            // RA=1, RCODE=0
-	binary.BigEndian.PutUint16(resp[6:8], 1)  // ANCOUNT=1
-	binary.BigEndian.PutUint16(resp[8:10], 0) // NSCOUNT=0
-	binary.BigEndian.PutUint16(resp[10:12], 0)
-	// answer:name 压缩指针指向 question(0xc00c)+ type + class IN + TTL + rdlength + rdata。
-	ans := []byte{0xc0, 0x0c}
-	ans = append(ans, byte(qtype>>8), byte(qtype)) // TYPE
-	ans = append(ans, 0x00, 0x01)                  // CLASS IN
-	ans = append(ans, 0x00, 0x00, 0x00, 0x1e)      // TTL=30s
-	if qtype == 1 {                                // A → 127.0.0.1
-		ans = append(ans, 0x00, 0x04, 127, 0, 0, 1)
-	} else { // AAAA → ::1
-		ans = append(ans, 0x00, 0x10)
-		ans = append(ans, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
-	}
-	return append(resp, ans...)
+func (c *sniDomainList) getUpstream() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]string(nil), c.upstream...)
 }
 
-// forwardDNS 把查询原样发给上游 :53 并返回响应(UDP,3s 超时)。
-func forwardDNS(query []byte, upstream string) []byte {
-	c, err := net.DialTimeout("udp", net.JoinHostPort(upstream, "53"), 3*time.Second)
+// effectivePinnedHosts 决定 Windows hosts 实际钉的精确主机名:优先 OSS pinned,
+// 拉不到/为空退回编译期 sniPinnedHosts。
+func effectivePinnedHosts() []string {
+	if p, _ := domainListCache.get(); len(p) > 0 {
+		return p
+	}
+	return sniPinnedHosts
+}
+
+// domainListVersion 是设备当前拉到的清单版本(ETag),供 SNI 快照上报;空=还没成功拉到。
+func domainListVersion() string {
+	_, etag := domainListCache.get()
+	return etag
+}
+
+// effectiveIntercept 决定 CoreDNS 通配的 apex:优先 OSS intercept,拉不到退回 cloud 下发配置。
+func effectiveIntercept(cfg *SNIConfig) []string {
+	if apex := domainListCache.getIntercept(); len(apex) > 0 {
+		return apex
+	}
+	return filterAllowedHosts(cfg.Intercept)
+}
+
+// effectiveUpstreams 优先使用 OSS 清单，失败时退回 cloud 配置，再退回编译期阿里 DNS。
+func effectiveUpstreams(cfg *SNIConfig) []string {
+	if upstreams := domainListCache.getUpstream(); len(upstreams) > 0 {
+		return upstreams
+	}
+	if upstreams := normalizeDNSUpstreams(cfg.Upstream); len(upstreams) > 0 {
+		return upstreams
+	}
+	return append([]string(nil), defaultSNIUpstreams...)
+}
+
+// refreshDomainList GET 内置 URL,校验并更新缓存。返回运行策略是否变化(供触发 re-arm)。
+// 任一步失败保留上次缓存(不清空,防坏拉取把 arm 打空),短超时不 hang。
+func refreshDomainList() (changed bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sniDomainListURL, nil)
 	if err != nil {
-		return nil
+		return false
 	}
-	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
-	if _, err := c.Write(query); err != nil {
-		return nil
-	}
-	buf := make([]byte, 1500)
-	n, err := c.Read(buf)
+	resp, err := domainListClient.Do(req)
 	if err != nil {
-		return nil
+		return false
 	}
-	return buf[:n]
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false
+	}
+	return updateDomainListCache(body, strings.Trim(resp.Header.Get("ETag"), `"`))
 }
 
-// ── helpers ──
-
-func normalizeDomains(ds []string) []string {
-	out := []string{}
-	for _, d := range ds {
-		if d = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), "."); d != "" {
-			out = append(out, d)
-		}
+// updateDomainListCache validates one OSS document and atomically publishes it.
+// Invalid or incomplete documents leave the last known-good policy untouched.
+func updateDomainListCache(body []byte, etag string) (changed bool) {
+	var parsed struct {
+		Pinned    []string `json:"pinned_hosts"`
+		Intercept []string `json:"intercept"`
+		Upstream  []string `json:"upstream"`
 	}
-	return out
+	if json.Unmarshal(body, &parsed) != nil {
+		return false
+	}
+	pinned := filterAllowedHosts(parsed.Pinned)
+	intercept := filterAllowedHosts(parsed.Intercept)
+	upstream := normalizeDNSUpstreams(parsed.Upstream)
+	if len(intercept) == 0 || len(upstream) == 0 {
+		return false
+	}
+	c := domainListCache
+	c.mu.Lock()
+	changed = strings.Join(c.pinned, ",") != strings.Join(pinned, ",") ||
+		strings.Join(c.intercept, ",") != strings.Join(intercept, ",") ||
+		strings.Join(c.upstream, ",") != strings.Join(upstream, ",")
+	c.pinned, c.intercept, c.upstream, c.etag = pinned, intercept, upstream, etag
+	c.mu.Unlock()
+	return changed
 }
 
-func firstUpstream(us []string) string {
-	for _, u := range us {
-		if u = strings.TrimSpace(u); u != "" {
-			return u
-		}
+// refreshDomainListAndRearm 拉一次;intercept/upstream/pinned 变化就重装当前 arm。
+func refreshDomainListAndRearm() {
+	if refreshDomainList() {
+		sniMgr.rearmActive()
 	}
-	return "223.5.5.5" // 阿里默认
+}
+
+// rearmActive 在 OSS 策略变化后重装当前 arm(若正 armed):teardown + 用同一 cfg 重 setup。
+func (m *sniManager) rearmActive() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cur == nil {
+		return
+	}
+	cfg := m.cur
+	m.teardownLocked()
+	if err := m.setupLocked(cfg); err != nil {
+		log.Printf("ccfly: SNI re-arm on domainlist change failed (fail-open): %v", err)
+		m.lastErr = err.Error()
+		m.teardownLocked()
+		return
+	}
+	m.cur = cfg
+	m.since = time.Now()
+	m.lastErr = ""
+	resetSNIProbe()
+	m.prober = startSNIProber(cfg.Exit, cfg.Account)
+	log.Printf("ccfly: SNI re-armed on domainlist change (%d intercept)", len(effectiveIntercept(cfg)))
 }

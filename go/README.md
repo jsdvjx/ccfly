@@ -22,6 +22,21 @@ or from the repo root:
 pnpm build:go
 ```
 
+## Verify the SNI egress environment
+
+When the cloud has assigned this device an SNI exit, the local control API can
+run a fresh production-path check:
+
+```sh
+curl -sS 'http://127.0.0.1:7699/sni-status?probe=1'
+```
+
+`probe.path_ok` is true only when the local interception is armed, the in-band
+nonce response identifies the configured overlay node and account exit, and a
+separate real upstream TLS handshake succeeds. `target_node`,
+`target_exit_id`, `target_identity`, and `bound_egress_ipv4` explain the
+observed selection when diagnosing a mismatch.
+
 ## Distribution
 
 CI cross-compiles this into per-platform binaries and packs each into an

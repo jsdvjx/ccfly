@@ -11,7 +11,7 @@ package mesh
 func resolverNeedsLocalDNS() bool { return true }
 
 // pointResolver 在未支持的平台不改系统解析(no-op)。
-func pointResolver(intercept []string, upstream string) error { return nil }
+func pointResolver(intercept []string, upstream string, pinned []string) error { return nil }
 
 // restoreResolver 在未支持的平台 no-op。
 func restoreResolver() error { return nil }

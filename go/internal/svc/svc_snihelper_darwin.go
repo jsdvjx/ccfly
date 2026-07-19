@@ -5,7 +5,7 @@ package svc
 // svc_snihelper_darwin.go — 安装 macOS SNI 的 root 特权 helper LaunchDaemon(com.ccfly.sni-helper)。
 //
 // 与主 agent 单元的关键区别:**不写 UserName 键 → 真以 root 跑**(主 agent 单元即便 --system 也会写
-// UserName 降到用户,才能共用 tmux/~/.claude 镜像会话;而 helper 只需 root 绑 :443 与写 /etc/hosts,
+// UserName 降到用户,才能共用 tmux/~/.claude 镜像会话;而 helper 只需 root 绑 :443/:53 与写 /etc/resolver,
 // 不碰会话)。装它必须已是 root(sudo),非 root 时返回 (false,nil) 让调用方提示改用 sudo。
 
 import (

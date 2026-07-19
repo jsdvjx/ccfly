@@ -33,14 +33,17 @@ func flushDNS() { _ = exec.Command("ipconfig", "/flushdns").Run() }
 // pointResolver 把 sniPinnedHosts 精确主机名写进 hosts 的 ccfly 托管块（局部替换）。
 // intercept/upstream 在 hosts 方案里不用（hosts 无通配、无上游转发；钉哪些主机由静态 sniPinnedHosts 决定）。
 // 需管理员（写 %SystemRoot%\System32\drivers\etc\hosts）。
-func pointResolver(intercept []string, upstream string) error {
+func pointResolver(intercept []string, upstream string, pinned []string) error {
 	_, _ = intercept, upstream
+	if len(pinned) == 0 {
+		pinned = sniPinnedHosts
+	}
 	p := hostsFilePath()
 	b, err := os.ReadFile(p)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	out := applyCcflyHostsBlock(string(b), sniPinnedHosts)
+	out := applyCcflyHostsBlock(string(b), pinned)
 	if strings.TrimRight(out, "\r\n") == strings.TrimRight(string(b), "\r\n") {
 		return nil // 内容等价（含块），免写盘/免刷缓存
 	}

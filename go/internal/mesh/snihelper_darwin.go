@@ -4,21 +4,22 @@ package mesh
 
 // snihelper_darwin.go — macOS 双进程 SNI arm 的两侧:
 //
-//   ① root helper（RunSNIHelper,由独立 LaunchDaemon `ccfly sni-helper` 以 root 跑）——承接两件
-//      agent 非 root 干不了的特权事:绑本地 :443、写 /etc/hosts。它不碰 overlay。
+//   ① root helper（RunSNIHelper,由独立 LaunchDaemon `ccfly sni-helper` 以 root 跑）——承接三件
+//      agent 非 root 干不了的特权事:绑本地 :443/:53、写 scoped /etc/resolver。它不碰 overlay。
 //   ② agent 客户端（setupViaHelper,在非 root 的 ccfly connect 进程里）——在非特权 loopback 端口起
 //      relay 监听跑现有 serve443（overlay 拨号必须留 agent:gVisor netstack 是进程内对象,不可跨进程),
-//      再连 helper 控制 socket 发一次 arm{relayPort, 精确主机名}。
+//      再连 helper 控制 socket 发一次 arm{relayPort, intercept, upstream}。
 //
 // 为什么 macOS 要拆:<1024 特权端口 macOS 只有 root 能绑,而 ccfly agent 故意以用户身份跑(共用同一
 // tmux/~/.claude 才能镜像会话),又无 CAP_NET_BIND_SERVICE 之类细粒度授权 → 单进程绑 :443 必 EACCES。
-// DNS 侧改用 /etc/hosts 精确主机名钉 loopback（复用 sni_hosts.go,与 Windows 对称),免掉本地 :53。
+// DNS 侧由 helper 内嵌 CoreDNS，并用 /etc/resolver/<apex> 只劫持目标域，不改系统全局 DNS。
 //
 // 数据面:claude → 127.0.0.1:443(helper accept) → splice 到 127.0.0.1:relayPort(agent) → overlay
 //         → 账号 byway-sni 出口。ClientHello 全程裸透传,exit 端 peek SNI 按设备源 IP 路由。
 //
-// 生命周期 = 控制连接:arm 时 helper 写 hosts+绑 :443,保持控制连接=租约;连接 EOF(agent 卸载/退出)
-// → helper 恢复 /etc/hosts + 关 :443。helper 自身重启先清残留 hosts 块(fail-open,不 brick 整机 claude)。
+// 生命周期 = 控制连接:arm 时 helper 起 CoreDNS、写 resolver、绑 :443,保持控制连接=租约;连接
+// EOF(agent 正常退出或崩溃)→ helper 删除 resolver、停 CoreDNS、关 :443。helper 由 launchd KeepAlive;
+// 自身重启时先清带 ccfly 标记的孤儿 resolver 文件。
 
 import (
 	"bufio"
@@ -61,7 +62,8 @@ func sniHelperFrontListenerCount() int { return len(sniHelperFront) }
 type sniArmReq struct {
 	Cmd       string   `json:"cmd"`        // "arm"
 	RelayPort int      `json:"relay_port"` // agent 侧非特权 relay 端口(helper 把 :443 连接 splice 到此)
-	Hosts     []string `json:"hosts"`      // 要钉到 loopback 的精确主机名(sniPinnedHosts)
+	Domains   []string `json:"domains"`    // CoreDNS 劫持 apex(含所有子域)
+	Upstreams []string `json:"upstreams"`  // 仅 IP[:port],未命中查询移交这些上游
 }
 
 // sniArmResp 是 helper → agent 的应答。
@@ -73,7 +75,7 @@ type sniArmResp struct {
 // ── agent 侧:经 helper arm ──
 
 // setupViaHelper 在 macOS 上把 SNI arm 拆成双进程:非特权 relay 监听 + 现有 serve443(overlay 拨号留
-// agent)+ 连 helper 承接 :443 与 /etc/hosts。控制连接存进 m.helperConn,teardownLocked 关它即撤租约。
+// agent)+ 连 helper 承接 :443、CoreDNS 与 /etc/resolver。控制连接存进 m.helperConn,关闭即撤租约。
 func (m *sniManager) setupViaHelper(cfg *SNIConfig) error {
 	// ① 非特权 relay 监听(loopback 随机端口);helper 把每条 :443 连接 splice 到此。
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -87,9 +89,14 @@ func (m *sniManager) setupViaHelper(cfg *SNIConfig) error {
 	// ② 连 helper 控制 socket,发 arm。
 	c, err := net.DialTimeout("unix", sniHelperSocket, 3*time.Second)
 	if err != nil {
-		return fmt.Errorf("sni-helper 未运行(macOS SNI 需 root helper 承接 :443;请以 sudo 重跑 ccfly install 安装): %w", err)
+		return fmt.Errorf("sni-helper 未运行(macOS SNI 需 root helper 承接 :443/:53 与 resolver;请以 sudo 重跑 ccfly install 安装): %w", err)
 	}
-	if err := writeJSONLine(c, sniArmReq{Cmd: "arm", RelayPort: relayPort, Hosts: sniPinnedHosts}); err != nil {
+	if err := writeJSONLine(c, sniArmReq{
+		Cmd:       "arm",
+		RelayPort: relayPort,
+		Domains:   effectiveIntercept(cfg),
+		Upstreams: effectiveUpstreams(cfg),
+	}); err != nil {
 		c.Close()
 		return err
 	}
@@ -115,14 +122,16 @@ func (m *sniManager) setupViaHelper(cfg *SNIConfig) error {
 // ── root helper 服务端 ──
 
 // RunSNIHelper 跑 root 特权 helper(独立 LaunchDaemon)。监听 unix 控制 socket,为非 root 的 agent
-// 承接 :443 与 /etc/hosts。每个连接=一次 arm 租约(新 arm 顶掉旧租约)。阻塞直到 socket 出错。
+// 承接 :443/:53 与 /etc/resolver。每个连接=一次 arm 租约(新 arm 顶掉旧租约)。阻塞直到 socket 出错。
 func RunSNIHelper() error {
 	allowedUID, err := configuredSNIHelperUID()
 	if err != nil {
 		return err
 	}
-	_ = restoreUnixHosts(unixHostsPath) // 上次非正常退出可能残留 hosts 块 → 先清,保证 fail-open(不把 claude 钉死)
-	_ = os.Remove(sniHelperSocket)      // 清残留 socket 文件,否则 bind EADDRINUSE
+	if err := restoreResolver(); err != nil { // helper 上次崩溃可能残留 resolver 标记文件;KeepAlive 重启先清
+		log.Printf("ccfly-sni-helper: startup resolver cleanup: %v", err)
+	}
+	_ = os.Remove(sniHelperSocket) // 清残留 socket 文件,否则 bind EADDRINUSE
 	ln, err := net.Listen("unix", sniHelperSocket)
 	if err != nil {
 		return err
@@ -137,7 +146,7 @@ func RunSNIHelper() error {
 		return fmt.Errorf("chmod helper socket: %w", err)
 	}
 	log.Printf("ccfly-sni-helper: listening on %s (root, allowed_uid=%d)", sniHelperSocket, allowedUID)
-	return (&sniHelper{hostsPath: unixHostsPath, allowedUID: uint32(allowedUID), enforcePeer: true}).serve(ln)
+	return (&sniHelper{allowedUID: uint32(allowedUID), enforcePeer: true}).serve(ln)
 }
 
 func configuredSNIHelperUID() (int, error) {
@@ -159,16 +168,15 @@ func configuredSNIHelperUID() (int, error) {
 }
 
 // sniHelper 持单一 arm 租约。gen 做租约代际:EOF 撤租约时只撤自己那代,不误伤后来的新租约。
-// hostsPath 在构造时捕获(生产恒 /etc/hosts):disarm 触发时按捕获值写,不随全局漂移(测试隔离关键)。
 type sniHelper struct {
 	mu          sync.Mutex
-	hostsPath   string
 	allowedUID  uint32
 	enforcePeer bool
 	connWG      sync.WaitGroup // lets tests/shutdown wait for lease teardown to finish
 	gen         uint64
 	listeners   []net.Listener // 当前租约的 :443 v4+v6
-	hostsOn     bool
+	dns         *coreDNSService
+	resolverOn  bool
 }
 
 // serve accept 控制连接的循环,阻塞直到 ln 出错/关闭。
@@ -238,37 +246,47 @@ func unixPeerUID(c net.Conn) (uint32, error) {
 }
 
 func validSNIArmRequest(req sniArmReq) bool {
-	if req.Cmd != "arm" || req.RelayPort < 1024 || req.RelayPort > 65535 || len(req.Hosts) != len(sniPinnedHosts) {
+	if req.Cmd != "arm" || req.RelayPort < 1024 || req.RelayPort > 65535 {
 		return false
 	}
-	for i := range sniPinnedHosts {
-		if req.Hosts[i] != sniPinnedHosts[i] {
+	// 清单来自设备读 OSS(信任点=OSS)。helper 不做厂商判断，只做严格格式/数量校验，避免
+	// root 进程生成任意 Corefile 或越出 /etc/resolver。
+	if len(req.Domains) == 0 || len(req.Domains) > 128 {
+		return false
+	}
+	for _, domain := range req.Domains {
+		if !isValidSNIHost(domain) {
 			return false
 		}
 	}
-	return true
+	return len(req.Upstreams) > 0 && len(req.Upstreams) <= maxCoreDNSUpstreams &&
+		len(normalizeDNSUpstreams(req.Upstreams)) == len(req.Upstreams)
 }
 
-// arm 落地一次租约:顶掉旧租约 → 写 /etc/hosts 钉域 → 绑 :443 双栈 splice 到 relayPort。返回代际号。
+// arm 落地一次租约。resolver 最后安装，确保系统开始把查询导来时 :443 和 CoreDNS 都已就绪。
 func (h *sniHelper) arm(req sniArmReq) (uint64, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.teardownLocked() // 顶掉旧租约(关旧 :443;hosts 下面覆盖写)
-	// Never trust the request as root-owned hosts content, even after peer auth.
-	// The wire field remains for compatibility with older agents but must exactly
-	// match the compiled allowlist validated above.
-	if err := writeUnixHosts(h.hostsPath, sniPinnedHosts); err != nil {
-		return 0, err
-	}
-	h.hostsOn = true
+	h.teardownLocked() // 顶掉旧租约
 	for _, addr := range sniHelperFront {
 		ln, err := net.Listen("tcp", addr)
 		if err != nil {
-			h.teardownLocked() // 回滚已绑的 + 恢复 hosts
+			h.teardownLocked()
 			return 0, err
 		}
 		h.listeners = append(h.listeners, ln)
 		go spliceAccept(ln, req.RelayPort)
+	}
+	dns, err := startCoreDNS(sniCoreDNSListenIP, sniCoreDNSPort, req.Domains, req.Upstreams)
+	if err != nil {
+		h.teardownLocked()
+		return 0, err
+	}
+	h.dns = dns
+	h.resolverOn = true // pointResolver 写到一半失败时也必须清理已写标记文件
+	if err := pointResolver(req.Domains, upstreamIP(req.Upstreams[0]), nil); err != nil {
+		h.teardownLocked()
+		return 0, err
 	}
 	h.gen++
 	return h.gen, nil
@@ -285,14 +303,23 @@ func (h *sniHelper) disarm(gen uint64) {
 }
 
 func (h *sniHelper) teardownLocked() {
+	// 先撤系统路由，避免 CoreDNS/443 关闭后还有新查询被导入。
+	if h.resolverOn {
+		if err := restoreResolver(); err != nil {
+			log.Printf("ccfly-sni-helper: restore resolver: %v", err)
+		}
+		h.resolverOn = false
+	}
+	if h.dns != nil {
+		if err := h.dns.Stop(); err != nil {
+			log.Printf("ccfly-sni-helper: stop CoreDNS: %v", err)
+		}
+		h.dns = nil
+	}
 	for _, ln := range h.listeners {
 		_ = ln.Close()
 	}
 	h.listeners = nil
-	if h.hostsOn {
-		_ = restoreUnixHosts(h.hostsPath)
-		h.hostsOn = false
-	}
 }
 
 // spliceAccept accept 本地 :443 连接,每条 splice 到 agent 的 relayPort。

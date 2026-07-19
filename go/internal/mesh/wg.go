@@ -257,6 +257,7 @@ func (s *wgSession) close() {
 		return
 	}
 	activeNet.CompareAndSwap(s.tnet, nil) // 只清自己发布的那个 netstack(避免竞掉重连后的新会话)
+	kickSNIProbe()                        // overlay 下线=网络变化:SNI 立即重检(若正 armed)
 	for _, l := range s.listeners {
 		if l != nil {
 			_ = l.Close()
@@ -310,6 +311,7 @@ func bringUpWG(ctx context.Context, st *State, c *websocket.Conn, lastAct *atomi
 
 	sess := &wgSession{dev: dev, bind: bind, tun: tunDev, tnet: tnet}
 	activeNet.Store(tnet) // 供 SNI :443 relay 经 overlay 拨到账号出口(见 sni.go)
+	kickSNIProbe()        // overlay 上线=网络变化:SNI 立即重检(若正 armed)
 
 	if err := dev.IpcSet(uapi); err != nil {
 		sess.close()

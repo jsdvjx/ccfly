@@ -13,7 +13,9 @@
 #      version from packages/cli/package.json into `main.version` (so
 #      `ccfly version` reports the real version, not "0.0.0-dev").
 #   2. Show installed-vs-new version.
-#   3. sudo-install it to the system bin and kickstart the daemon.
+#   3. sudo-install it to the system bin and kickstart the daemons. On macOS,
+#      restart the root SNI helper first because it shares this binary and has
+#      a versioned control protocol with the user agent.
 #
 # Usage:
 #   scripts/deploy-device.sh                 # build + install + restart
@@ -32,7 +34,7 @@
 # Notes:
 #   - The install + kickstart need root. Run this yourself in an interactive
 #     shell so sudo can prompt; the agent should use --print-only and hand you
-#     the two sudo lines to run.
+#     the sudo commands to run.
 #   - CGO_ENABLED=0 → fully static, matches the published binaries.
 
 set -euo pipefail
@@ -47,6 +49,8 @@ CLI_PKG_JSON="${ROOT_DIR}/packages/cli/package.json"
 # --- defaults --------------------------------------------------------------
 BIN_PATH="/usr/local/bin/ccfly"
 SERVICE="system/com.ccfly.agent"
+HELPER_SERVICE="system/com.ccfly.sni-helper"
+HELPER_PLIST="/Library/LaunchDaemons/com.ccfly.sni-helper.plist"
 VERSION=""
 NO_RESTART=0
 PRINT_ONLY=0
@@ -107,6 +111,7 @@ fi
 # --- install + restart -----------------------------------------------------
 install_cmd="sudo install -m755 '${TMP_BIN}' '${BIN_PATH}'"
 restart_cmd="sudo launchctl kickstart -k '${SERVICE}'"
+restart_helper_cmd="sudo launchctl kickstart -k '${HELPER_SERVICE}'"
 
 if [[ "${PRINT_ONLY}" == "1" ]]; then
   # Keep the built binary so the printed commands stay valid for the operator.
@@ -115,7 +120,10 @@ if [[ "${PRINT_ONLY}" == "1" ]]; then
   echo
   echo "deploy-device: --print-only — run these yourself (sudo will prompt):"
   echo "  sudo install -m755 '${KEEP_BIN}' '${BIN_PATH}'"
-  [[ "${NO_RESTART}" == "0" ]] && echo "  ${restart_cmd}"
+  if [[ "${NO_RESTART}" == "0" ]]; then
+    [[ "${GOOS}" == "darwin" && -f "${HELPER_PLIST}" ]] && echo "  ${restart_helper_cmd}"
+    echo "  ${restart_cmd}"
+  fi
   echo "  ${BIN_PATH} version   # expect: ccfly ${VERSION}"
   exit 0
 fi
@@ -125,8 +133,13 @@ eval "${install_cmd}"
 
 if [[ "${NO_RESTART}" == "1" ]]; then
   echo "deploy-device: --no-restart — daemon NOT kicked; run when ready:"
+  [[ "${GOOS}" == "darwin" && -f "${HELPER_PLIST}" ]] && echo "  ${restart_helper_cmd}"
   echo "  ${restart_cmd}"
 else
+  if [[ "${GOOS}" == "darwin" && -f "${HELPER_PLIST}" ]]; then
+    echo "deploy-device: ${restart_helper_cmd}"
+    eval "${restart_helper_cmd}"
+  fi
   echo "deploy-device: ${restart_cmd}"
   eval "${restart_cmd}"
 fi

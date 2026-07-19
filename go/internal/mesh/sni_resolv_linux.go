@@ -19,8 +19,8 @@ const (
 func resolverNeedsLocalDNS() bool { return true }
 
 // pointResolver 把 resolv.conf 改成「127.0.0.1 优先 + 真上游次级(fail-open)」。首次调用备份原文件。
-func pointResolver(intercept []string, upstream string) error {
-	_ = intercept // Linux 全局拦截,不按域 scoped;本地 DNS 内部按 intercept 过滤
+func pointResolver(intercept []string, upstream string, pinned []string) error {
+	_, _ = intercept, pinned // Linux 全局拦截,不按域/主机 scoped;本地 DNS 内部按 intercept 过滤
 	if _, err := os.Stat(resolvBackup); os.IsNotExist(err) {
 		orig, rerr := os.ReadFile(resolvPath)
 		if rerr != nil {

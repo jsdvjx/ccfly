@@ -109,7 +109,7 @@ func Uninstall(o Options) error {
 	}
 }
 
-// InstallSNIHelper 安装 macOS SNI 的 root 特权 helper LaunchDaemon(承接 :443 + /etc/hosts,让非 root
+// InstallSNIHelper 安装 macOS SNI 的 root 特权 helper LaunchDaemon(承接 :443/:53 + /etc/resolver,让非 root
 // 的 agent 也能 arm SNI 出口)。仅 darwin 有意义且需 root;其余平台或非 root → (false,nil) no-op。
 // installed 报告是否真的装了(供调用方决定提示文案)。
 func InstallSNIHelper(dryRun bool) (installed bool, err error) {

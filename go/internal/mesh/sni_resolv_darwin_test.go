@@ -14,9 +14,17 @@ import (
 
 func TestDarwinResolverScoped(t *testing.T) {
 	dir := t.TempDir()
-	old := resolverDir
+	// hosts 也打桩到临时文件:restoreResolver 会顺带恢复旧版 hosts 托管块,
+	// 不桩就会去动真 /etc/hosts(非 root 直接 permission denied)。
+	hostsPath := filepath.Join(dir, "hosts")
+	if err := os.WriteFile(hostsPath, []byte("127.0.0.1\tlocalhost\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old, oldPort, oldHosts := resolverDir, sniCoreDNSPort, unixHostsPath
 	resolverDir = dir
-	defer func() { resolverDir = old }()
+	sniCoreDNSPort = defaultCoreDNSPort
+	unixHostsPath = hostsPath
+	defer func() { resolverDir, sniCoreDNSPort, unixHostsPath = old, oldPort, oldHosts }()
 
 	// 预置一个用户自己的 resolver 文件(不带 ccfly 标记)——restore 绝不能删它。
 	userFile := filepath.Join(dir, "corp.example.com")
@@ -25,7 +33,7 @@ func TestDarwinResolverScoped(t *testing.T) {
 	}
 
 	intercept := []string{"anthropic.com", "claude.ai", "statsig.com"}
-	if err := pointResolver(intercept, "223.5.5.5"); err != nil {
+	if err := pointResolver(intercept, "223.5.5.5", nil); err != nil {
 		t.Fatalf("pointResolver: %v", err)
 	}
 	// 每个 intercept 域一个文件,内容含 127.0.0.1 + 标记。
@@ -49,6 +57,26 @@ func TestDarwinResolverScoped(t *testing.T) {
 	}
 	if _, err := os.Stat(userFile); err != nil {
 		t.Fatal("restore 绝不能删用户自己的 resolver 文件")
+	}
+}
+
+func TestDarwinResolverRefusesExistingDomain(t *testing.T) {
+	dir := t.TempDir()
+	old := resolverDir
+	resolverDir = dir
+	defer func() { resolverDir = old }()
+
+	path := filepath.Join(dir, "anthropic.com")
+	original := "nameserver 10.0.0.53\nsearch_order 1\n"
+	if err := os.WriteFile(path, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := pointResolver([]string{"anthropic.com"}, "223.5.5.5", nil); err == nil {
+		t.Fatal("pointResolver should refuse to overwrite a user-owned resolver")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || string(b) != original {
+		t.Fatalf("existing resolver changed: %q, %v", b, err)
 	}
 }
 
