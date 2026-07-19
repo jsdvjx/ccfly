@@ -39,20 +39,21 @@ import (
 
 // State is the persisted per-host connection state (~/.ccfly/conn-<host>.json).
 type State struct {
-	Host           string `json:"host"`
-	Scheme         string `json:"scheme"` // http | https (control plane)
-	DeviceID       string `json:"device_id"`
-	Name           string `json:"name"`
-	Owner          string `json:"owner"`
-	PrivateKey     string `json:"private_key"` // device WG private key (base64)
-	PublicKey      string `json:"public_key"`
-	OverlayIP      string `json:"overlay_ip"`
-	OverlayCIDR    string `json:"overlay_cidr"`
-	CloudPublicKey string `json:"cloud_public_key"`
-	CloudOverlayIP string `json:"cloud_overlay_ip"`
-	MeshURL        string `json:"mesh_url"`
-	MeshToken      string `json:"mesh_token"`
-	KeepaliveSec   int    `json:"keepalive_sec"`
+	Host           string         `json:"host"`
+	Scheme         string         `json:"scheme"` // http | https (control plane)
+	DeviceID       string         `json:"device_id"`
+	Name           string         `json:"name"`
+	Owner          string         `json:"owner"`
+	PrivateKey     string         `json:"private_key"` // device WG private key (base64)
+	PublicKey      string         `json:"public_key"`
+	OverlayIP      string         `json:"overlay_ip"`
+	OverlayCIDR    string         `json:"overlay_cidr"`
+	CloudPublicKey string         `json:"cloud_public_key"`
+	CloudOverlayIP string         `json:"cloud_overlay_ip"`
+	MeshURL        string         `json:"mesh_url"`
+	MeshEndpoints  []MeshEndpoint `json:"mesh_endpoints,omitempty"`
+	MeshToken      string         `json:"mesh_token"`
+	KeepaliveSec   int            `json:"keepalive_sec"`
 	// 云端下发的出网代理策略(可选):设了 ProxyPort 即「该云端在 overlay 上跑着代理」,设备据此
 	// 零配置自动起 127.0.0.1:<port> → cloud_overlay_ip:<port> 转发 + 给会话注入代理环境(见 applyMeshProxy)。
 	ProxyPort   int    `json:"proxy_port,omitempty"`
@@ -73,19 +74,20 @@ type State struct {
 
 // connectResp mirrors ccfly-cloud's POST /connect response.
 type connectResp struct {
-	DeviceID       string `json:"device_id"`
-	Name           string `json:"name"`
-	Owner          string `json:"owner"`
-	OverlayIP      string `json:"overlay_ip"`
-	OverlayCIDR    string `json:"overlay_cidr"`
-	CloudPublicKey string `json:"cloud_public_key"`
-	CloudOverlayIP string `json:"cloud_overlay_ip"`
-	MeshURL        string `json:"mesh_url"`
-	MeshToken      string `json:"mesh_token"`
-	KeepaliveSec   int    `json:"keepalive_sec"`
-	ProxyPort      int    `json:"proxy_port,omitempty"`
-	ProxyScheme    string `json:"proxy_scheme,omitempty"`
-	ProxyCA        string `json:"proxy_ca,omitempty"`
+	DeviceID       string         `json:"device_id"`
+	Name           string         `json:"name"`
+	Owner          string         `json:"owner"`
+	OverlayIP      string         `json:"overlay_ip"`
+	OverlayCIDR    string         `json:"overlay_cidr"`
+	CloudPublicKey string         `json:"cloud_public_key"`
+	CloudOverlayIP string         `json:"cloud_overlay_ip"`
+	MeshURL        string         `json:"mesh_url"`
+	MeshEndpoints  []MeshEndpoint `json:"mesh_endpoints,omitempty"`
+	MeshToken      string         `json:"mesh_token"`
+	KeepaliveSec   int            `json:"keepalive_sec"`
+	ProxyPort      int            `json:"proxy_port,omitempty"`
+	ProxyScheme    string         `json:"proxy_scheme,omitempty"`
+	ProxyCA        string         `json:"proxy_ca,omitempty"`
 }
 
 // Connect 把设备接入 <target> 并持有 mesh 隧道,直到 ctx 取消。target 形态:
@@ -145,6 +147,9 @@ func applyEnroll(st *State, resp *connectResp) error {
 	st.CloudPublicKey = resp.CloudPublicKey
 	st.CloudOverlayIP = resp.CloudOverlayIP
 	st.MeshURL = resp.MeshURL
+	if len(resp.MeshEndpoints) > 0 {
+		st.MeshEndpoints = append([]MeshEndpoint(nil), resp.MeshEndpoints...)
+	}
 	st.MeshToken = resp.MeshToken
 	st.KeepaliveSec = resp.KeepaliveSec
 	st.ProxyPort = resp.ProxyPort // 云端下发的代理策略,持久化:CLI(ccfly new/a)与下次重连都据此自动配
@@ -500,15 +505,16 @@ func applyProxyCA(caPEM string) {
 }
 
 type deviceConfig struct {
-	CloudPublicKey string     `json:"cloud_public_key"`
-	CloudOverlayIP string     `json:"cloud_overlay_ip"`
-	ProxyPort      int        `json:"proxy_port"`
-	ProxyScheme    string     `json:"proxy_scheme"`
-	ProxyCA        string     `json:"proxy_ca"`
-	CanUseClaude   *bool      `json:"can_use_claude"`
-	CanUseProxy    *bool      `json:"can_use_proxy"`
-	CanUseMesh     *bool      `json:"can_use_mesh"`
-	SNI            *SNIConfig `json:"sni"`
+	CloudPublicKey string         `json:"cloud_public_key"`
+	CloudOverlayIP string         `json:"cloud_overlay_ip"`
+	MeshEndpoints  []MeshEndpoint `json:"mesh_endpoints"`
+	ProxyPort      int            `json:"proxy_port"`
+	ProxyScheme    string         `json:"proxy_scheme"`
+	ProxyCA        string         `json:"proxy_ca"`
+	CanUseClaude   *bool          `json:"can_use_claude"`
+	CanUseProxy    *bool          `json:"can_use_proxy"`
+	CanUseMesh     *bool          `json:"can_use_mesh"`
+	SNI            *SNIConfig     `json:"sni"`
 }
 
 func fetchDeviceConfig(ctx context.Context, st *State) (deviceConfig, error) {
@@ -573,6 +579,9 @@ func refreshConfig(ctx context.Context, st *State) {
 	}
 	if c.CloudOverlayIP != "" && c.CloudOverlayIP != st.CloudOverlayIP {
 		st.CloudOverlayIP, changed = c.CloudOverlayIP, true
+	}
+	if len(c.MeshEndpoints) > 0 && !sameMeshEndpoints(st.MeshEndpoints, c.MeshEndpoints) {
+		st.MeshEndpoints, changed = append([]MeshEndpoint(nil), c.MeshEndpoints...), true
 	}
 	if c.ProxyPort != st.ProxyPort {
 		st.ProxyPort, changed = c.ProxyPort, true
@@ -650,15 +659,42 @@ func runTunnel(ctx context.Context, st *State) error {
 }
 
 func dialOnce(ctx context.Context, st *State) error {
-	u := st.MeshURL + "?token=" + url.QueryEscape(st.MeshToken)
+	endpoints := configuredMeshEndpoints(st.MeshEndpoints, st.MeshURL)
+	if len(endpoints) == 0 {
+		return errors.New("no valid mesh endpoints configured")
+	}
+	var endpointErrs []error
+	for _, endpoint := range endpoints {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		err := dialEndpoint(ctx, st, endpoint)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		endpointErrs = append(endpointErrs, fmt.Errorf("%s: %w", meshEndpointLabel(endpoint), err))
+		log.Printf("ccfly: mesh endpoint failed (%s): %v", meshEndpointLabel(endpoint), err)
+	}
+	return errors.Join(endpointErrs...)
+}
+
+func dialEndpoint(ctx context.Context, st *State, endpoint MeshEndpoint) error {
+	u, err := meshURLWithToken(endpoint.URL, st.MeshToken)
+	if err != nil {
+		return err
+	}
+	httpClient, err := meshHTTPClient(endpoint)
+	if err != nil {
+		return err
+	}
 	dctx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	c, _, err := websocket.Dial(dctx, u, &websocket.DialOptions{HTTPClient: cloudhttp.Client})
+	c, _, err := websocket.Dial(dctx, u, &websocket.DialOptions{HTTPClient: httpClient})
 	cancel()
 	if err != nil {
 		return err
 	}
 	defer c.CloseNow()
-	log.Printf("ccfly: mesh up (overlay %s via %s)", st.OverlayIP, st.Host)
+	log.Printf("ccfly: mesh up (overlay %s via %s)", st.OverlayIP, meshEndpointLabel(endpoint))
 
 	keepalive := time.Duration(st.KeepaliveSec) * time.Second
 	if keepalive <= 0 {

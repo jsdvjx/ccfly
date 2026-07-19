@@ -37,6 +37,21 @@ separate real upstream TLS handshake succeeds. `target_node`,
 `target_exit_id`, `target_identity`, and `bound_egress_ipv4` explain the
 observed selection when diagnosing a mismatch.
 
+## Mesh endpoint failover
+
+`CCFLY_MESH_ENDPOINTS` optionally supplies an ordered JSON list of mesh
+endpoints. `url` remains the WebSocket Host and TLS certificate identity;
+`dial_addr` optionally selects a different TCP destination. The cloud-provided
+`mesh_url` is always appended as the final compatibility fallback.
+
+```sh
+CCFLY_MESH_ENDPOINTS='[{"url":"wss://114.132.213.6/mesh","dial_addr":"138.252.163.7:443"}]'
+```
+
+Each endpoint is attempted in order. A failed or disconnected preferred route
+falls through to the next entry without changing the device identity or mesh
+token. A malformed override is ignored so the legacy route remains available.
+
 ## Distribution
 
 CI cross-compiles this into per-platform binaries and packs each into an
