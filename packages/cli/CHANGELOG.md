@@ -1,5 +1,18 @@
 # ccfly
 
+## 0.17.0
+
+### Minor Changes
+
+- 8c2ec13: Make cloud-CDP OAuth the default `ccfly claude login`: the local Claude CLI owns the complete OAuth flow and writes its credential locally, while ccfly sends the short-lived authorize request to the cloud workbench, lets the user choose one of their Claude accounts, starts that account's fixed-identity browser for hCaptcha/Authorize, automatically pastes the one-shot result back into Claude, and destroys it after local persistence. The previous sealed inventory delivery remains available explicitly as `--credential`, and `--auto` remains available.
+- 70d0d89: Embed CoreDNS for SNI domain interception, hot-reload intercept domains and upstream resolvers from the OSS policy, and move macOS DNS ownership into the root helper lease so scoped `/etc/resolver` entries are removed when the user agent exits or disconnects.
+- 70d0d89: Add an in-band SNI egress environment check. The device now sends a nonce through the same local `:443` production relay, verifies the configured overlay node and source-selected account exit reported by byway, and only reports `path_ok` when local interception, that identity check, and a real upstream TLS handshake all succeed.
+- 70d0d89: Split SNI detection into a component self-check and a real application-path check, with explicit conflict classification. The old direct `127.0.0.1` probes are demoted to `component_ok` (`:53` DNS, `:443` listener, overlay, direct nonce to the target node). On top of that, the probe now resolves the canary through the platform-native resolver (libinfo on macOS via `dscacheutil`, `GetAddrInfo` on Windows, `resolv.conf` on Linux), requires every resolved address to be loopback, then dials the resolved address — not a hardcoded `127.0.0.1` — to re-verify node/account identity with a nonce and complete a real upstream TLS handshake. Results carry `resolver_ok`, `resolved_addresses`, `loopback_route_ok`, `target_ok`, `tls_ok`, `path_ok`, a `mode` of `transparent`/`fakedns_conflict`/`local_conflict`/`target_mismatch`/`upstream_failed`/`checking`, and a machine-readable `error_code` (e.g. `FAKEDNS_HIJACK` on `198.18.0.0/15` fake-ip). Probing now runs on a scheduler: immediately after arm, every 30s when healthy, 2s→5s→10s→30s backoff on failure, instant re-check on WG/config changes, and results older than 45s are reported as stale `checking` instead of healthy.
+
+### Patch Changes
+
+- fc7dd5a: Refresh the SNI intercept domain list on device-config refresh and on the 15s policy ticker, re-arming local interception as soon as the OSS policy changes instead of waiting for a full reconnect.
+
 ## 0.16.0
 
 ### Minor Changes

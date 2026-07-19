@@ -55,23 +55,7 @@ importers:
 
   npm/ccfly-win32-x64: {}
 
-  packages/cli:
-    optionalDependencies:
-      ccfly-darwin-arm64:
-        specifier: 0.15.5
-        version: 0.15.5
-      ccfly-darwin-x64:
-        specifier: 0.15.5
-        version: 0.15.5
-      ccfly-linux-arm64:
-        specifier: 0.15.5
-        version: 0.15.5
-      ccfly-linux-x64:
-        specifier: 0.15.5
-        version: 0.15.5
-      ccfly-win32-x64:
-        specifier: 0.15.5
-        version: 0.15.5
+  packages/cli: {}
 
   packages/react:
     dependencies:
@@ -953,36 +937,6 @@ packages:
 
   caniuse-lite@1.0.30001793:
     resolution: {integrity: sha512-iwSsYWaCOoh26cV8NwNRViHlrfUvYsHDfRVcbtmw0Kg6PJIZZXwMkj1442FYLBGkeUf1juAsU3DTfxW579mrPA==}
-
-  ccfly-darwin-arm64@0.15.5:
-    resolution: {integrity: sha512-1rseysj40m+9lVwtYIH2CbgZQ9EyjaMKzrXW62+NjJsYf5XeFEn/D4AJuwD0EoFZHzW+ksm7njsOWt5jP5nWWQ==}
-    engines: {node: '>=18'}
-    cpu: [arm64]
-    os: [darwin]
-
-  ccfly-darwin-x64@0.15.5:
-    resolution: {integrity: sha512-gdbo0k0LeAexHrJ1X5HA+SgLlkorw/su2Y2qScf53KTlsYaWx84t3CCArPfXQE3arUoN/ZEXM3YYhYEgsZTMCw==}
-    engines: {node: '>=18'}
-    cpu: [x64]
-    os: [darwin]
-
-  ccfly-linux-arm64@0.15.5:
-    resolution: {integrity: sha512-WHunmFpaNZiicGT67WjCMS6N4q7Tmdw4bUeE4+U29tN/I7/vMXLjqcY0Wta01aOtTy8OyjiBQhJigi0dDf6XfQ==}
-    engines: {node: '>=18'}
-    cpu: [arm64]
-    os: [linux]
-
-  ccfly-linux-x64@0.15.5:
-    resolution: {integrity: sha512-hlIVFxvCPIWhEm1MsCfivHsauJP2XnYXMkPF+STzIbnLw+0mnKNB2hXhc/nDLTWWJ0HTiZvwPjRxTGJ99+6czw==}
-    engines: {node: '>=18'}
-    cpu: [x64]
-    os: [linux]
-
-  ccfly-win32-x64@0.15.5:
-    resolution: {integrity: sha512-JpkJfH2sFloO/tvmoPOOOlNGAITsBbMiMvHHktXq+DPO13fyKe9REQPTfYmhmhfOoYO+VIzTYXWmN6QrceJRgQ==}
-    engines: {node: '>=18'}
-    cpu: [x64]
-    os: [win32]
 
   ccount@2.0.1:
     resolution: {integrity: sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg==}
@@ -2706,21 +2660,6 @@ snapshots:
   cac@6.7.14: {}
 
   caniuse-lite@1.0.30001793: {}
-
-  ccfly-darwin-arm64@0.15.5:
-    optional: true
-
-  ccfly-darwin-x64@0.15.5:
-    optional: true
-
-  ccfly-linux-arm64@0.15.5:
-    optional: true
-
-  ccfly-linux-x64@0.15.5:
-    optional: true
-
-  ccfly-win32-x64@0.15.5:
-    optional: true
 
   ccount@2.0.1: {}
 
