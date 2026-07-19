@@ -39,6 +39,13 @@ import (
 var version = "0.0.0-dev"
 
 func main() {
+	// `claude auth login` honors BROWSER by spawning that executable with the
+	// authorize URL. CDP login points BROWSER back to this binary and marks the
+	// child environment so the URL is swallowed instead of opening a local
+	// browser; the same URL is sent to the fixed-identity cloud browser below.
+	if os.Getenv("CCFLY_CDP_LOGIN_BROWSER_SINK") == "1" {
+		return
+	}
 	// panemap-hook 最先短路:它作为 Claude Code 的 SessionStart hook 在**每次会话启动**时被
 	// 调起,把「当前 tmux pane → 当前 session id」登记进 ~/.ccfly/panemap.json 真值表
 	// (webui 控制端点据此确定性地找到会话所在 pane,杜绝消息错发)。不走 ensureToolPath
@@ -55,7 +62,7 @@ func main() {
 		}
 		return
 	}
-	// sni-helper:macOS SNI arm 的 root 特权子服务(独立 LaunchDaemon,承接 :443 与 /etc/hosts;
+	// sni-helper:macOS SNI arm 的 root 特权子服务(独立 LaunchDaemon,承接 :443/:53 与 /etc/resolver;
 	// agent 非 root 干不了这两件事,见 mesh/snihelper_darwin.go)。不走 ensureToolPath(纯网络守护,
 	// 无 tmux/claude 依赖,免 5s 登录壳 PATH 探测)。
 	if len(os.Args) > 1 && os.Args[1] == "sni-helper" {
@@ -121,7 +128,7 @@ func main() {
 			log.Fatalf("new: %v", err)
 		}
 	case "claude":
-		if err := runClaude(os.Args[2:]); err != nil {
+		if err := runClaude(ctx, os.Args[2:]); err != nil {
 			log.Fatalf("claude: %v", err)
 		}
 	case "version", "-v", "--version":
@@ -301,13 +308,13 @@ func runInstall(ctx context.Context, args []string) error {
 		return errors.New("Windows 上 install 需要管理员权限(SNI 需写 hosts、注册提权计划任务):请用管理员终端重跑,或直接用安装器 ccfly-setup(自动提权)")
 	}
 
-	// macOS 一律要求 root:SNI 出口的 root helper 必须以 root 绑 :443 / 写 /etc/hosts(agent 非 root 干不了,
+	// macOS 一律要求 root:SNI 出口的 root helper 必须以 root 绑 :443/:53、写 /etc/resolver(agent 非 root 干不了,
 	// 且 macOS 无 CAP_NET_BIND_SERVICE / 无法降特权端口阈值)。故 macOS install 直接 hard-require sudo,
 	// 且 agent 一并装成 **system LaunchDaemon(UserName=真实用户)**——以真实用户身份跑(共用 tmux/~/.claude),
 	// 但由 root 装、走 system 域,避开「用户 LaunchAgent 在 sudo 下 asuser 加载」那套麻烦。检查须在配对前。
 	if runtime.GOOS == "darwin" {
 		if !*dry && !svc.IsAdmin() {
-			return errors.New("macOS 上 ccfly install 需要 root(SNI 出口的 root helper 要绑 :443/写 /etc/hosts):请用 sudo 重跑,例如: sudo ccfly install " + target)
+			return errors.New("macOS 上 ccfly install 需要 root(SNI 出口的 root helper 要绑 :443/:53、写 /etc/resolver):请用 sudo 重跑,例如: sudo ccfly install " + target)
 		}
 		*system = true // agent 装成 system-daemon-as-user;root helper 另装为纯 root 守护
 	}
@@ -331,7 +338,7 @@ func runInstall(ctx context.Context, args []string) error {
 	if err := svc.Install(svc.Options{Target: target, System: *system, ClaudeDir: *claudeDir, DryRun: *dry, ExtraArgs: extra}); err != nil {
 		return err
 	}
-	// macOS:随 agent 一并装 SNI root helper(承接 :443/写 /etc/hosts)。此处 root 已由上面的闸门保证
+	// macOS:随 agent 一并装 SNI root helper(承接 :443/:53 与 scoped resolver)。此处 root 已由上面的闸门保证
 	// (非 dry-run 必 sudo),故正常都会真正装上。失败只警告不阻断(agent 已装好,SNI 出口不生效而已)。
 	if runtime.GOOS == "darwin" {
 		installed, herr := svc.InstallSNIHelper(*dry)

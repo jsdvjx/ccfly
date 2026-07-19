@@ -1,6 +1,7 @@
 package main
 
-// claude_login.go — `ccfly claude login`:经 ccfly-cloud 的 Claude account 模块登录,把凭证拉回本机。
+// claude_login.go — `ccfly claude login --credential` 的旧库存凭据领取实现。
+// 无模式参数的默认完整 OAuth/CDP 流程在 claude_cdp_login.go；这里仍负责命令分发及兼容模式。
 //
 // 流程(对应 cloud login.go 的设备侧三端点,mesh_token 鉴权):
 //   POST /api/device/login/start  {email?[, out_node_ip, egress_v6]} → {job_id, account_email, egress_v6, out_node_ip}
@@ -96,16 +97,16 @@ func configureClaudeLoginControlHooks() {
 }
 
 // runClaude 分发 `ccfly claude <sub>`。
-func runClaude(args []string) error {
+func runClaude(ctx context.Context, args []string) error {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--auto] [--email <e>] [--node <ip>] [--egress <v6>] [--host <cloud>]")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--email <e>] [--credential | --auto] [--host <cloud>]")
 		fmt.Fprintln(os.Stderr, "       ccfly claude logout [--host <cloud>]")
 		fmt.Fprintln(os.Stderr, "       ccfly claude status [--host <cloud>]")
 		return nil
 	}
 	switch args[0] {
 	case "login":
-		return runClaudeLogin(args[1:])
+		return runClaudeLogin(ctx, args[1:])
 	case "logout":
 		return runClaudeLogout(args[1:])
 	case "status":
@@ -115,18 +116,21 @@ func runClaude(args []string) error {
 	}
 }
 
-func runClaudeLogin(args []string) error {
+func runClaudeLogin(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("claude login", flag.ExitOnError)
-	email := fs.String("email", "", "Claude account email (省略 = 云端在你可访问的共享账号里按用量自动选号)")
+	email := fs.String("email", "", "Claude account email (默认 CDP 模式省略时在云端工作台手动选择)")
 	node := fs.String("node", "", "out node overlay IP (omit to reuse the account's provisioned egress)")
 	egress := fs.String("egress", "", "egress /128 (omit to reuse)")
 	host := fs.String("host", "", "cloud host (default: the only enrolled cloud)")
 	auto := fs.Bool("auto", false, "生成网页人工登录接力链接；凭据就绪后自动密封回本设备")
+	credential := fs.Bool("credential", false, "旧模式：从云端库存领取密封凭据")
+	cdp := fs.Bool("cdp", false, "兼容别名：CDP 完整登录现已是默认模式")
 	bg := fs.Bool("_bg", false, "")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--auto] [--email <e>] [--node <ip>] [--egress <v6>] [--host <cloud>]")
-		fmt.Fprintln(os.Stderr, "  省略 --email:云端自动选号(共享账号里按 claude 用量 + 分配次数挑一个)。")
-		fmt.Fprintln(os.Stderr, "  给 --email:登该(自有)账号,复用其已 provision 的出口;或加 --node+--egress 一次性创建+登录。")
+		fmt.Fprintln(os.Stderr, "Usage: ccfly claude login [--email <e>] [--credential | --auto] [--host <cloud>]")
+		fmt.Fprintln(os.Stderr, "  默认：本机 Claude CLI 走完整 OAuth；URL 发到云端后打开工作台，由你选择自己的 Claude 账号。")
+		fmt.Fprintln(os.Stderr, "  --email: 跳过账号选择，直接使用指定的本人云端账号。")
+		fmt.Fprintln(os.Stderr, "  --credential: 使用旧的服务端凭据库存领取模式；该模式才支持 --node / --egress。")
 		fs.PrintDefaults()
 	}
 	_ = fs.Parse(args)
@@ -139,6 +143,12 @@ func runClaudeLogin(args []string) error {
 	// (未登录 / 不在准入组)。nil=未知(老云端/未刷新)一律放行。真正鉴权仍在云端(会 403)。
 	if !mesh.ClaudeLoginAllowed(tgt.Host) {
 		return fmt.Errorf("该账号未获授权使用 Claude 账号功能(内部功能);请联系管理员将你加入准入用户组")
+	}
+	if *credential && *cdp {
+		return fmt.Errorf("--credential 与 --cdp 是两种不同登录模式，不能同时使用")
+	}
+	if *auto && (*credential || *cdp) {
+		return fmt.Errorf("--auto 不能与 --credential 或 --cdp 同时使用")
 	}
 	if *auto {
 		if *bg || strings.TrimSpace(*node) != "" || strings.TrimSpace(*egress) != "" {
@@ -153,10 +163,16 @@ func runClaudeLogin(args []string) error {
 		return nil
 	}
 
-	if *bg {
-		return runClaudeLoginBackground(tgt, strings.TrimSpace(*email), strings.TrimSpace(*node), strings.TrimSpace(*egress))
+	if *credential {
+		if *bg {
+			return runClaudeLoginBackground(tgt, strings.TrimSpace(*email), strings.TrimSpace(*node), strings.TrimSpace(*egress))
+		}
+		return forkLoginBackground(tgt, strings.TrimSpace(*email), strings.TrimSpace(*node), strings.TrimSpace(*egress))
 	}
-	return forkLoginBackground(tgt, strings.TrimSpace(*email), strings.TrimSpace(*node), strings.TrimSpace(*egress))
+	if *bg || strings.TrimSpace(*node) != "" || strings.TrimSpace(*egress) != "" {
+		return fmt.Errorf("--node、--egress 和内部 --_bg 仅可与旧模式 --credential 一起使用")
+	}
+	return runClaudeCDPLogin(ctx, tgt, strings.TrimSpace(*email))
 }
 
 func forkLoginBackground(tgt mesh.LoginTarget, email, node, egress string) error {
@@ -171,7 +187,7 @@ func forkLoginBackground(tgt mesh.LoginTarget, email, node, egress string) error
 	if err != nil {
 		return fmt.Errorf("cannot find self executable: %w", err)
 	}
-	cliArgs := []string{"claude", "login", "--_bg", "--host", tgt.Host}
+	cliArgs := []string{"claude", "login", "--credential", "--_bg", "--host", tgt.Host}
 	if email != "" {
 		cliArgs = append(cliArgs, "--email", email)
 	}
